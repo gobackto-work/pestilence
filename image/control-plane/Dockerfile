@@ -12,7 +12,8 @@
 # It is never exposed publicly. town is its own deployment and reaches this over the
 # cluster network, which is also why pestilence needs no CORS and no Ingress.
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# Digest-pinned: a tag can be moved, a digest cannot. Shared with scarab's broker image.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 # Cross-compiled by hack/load-image.sh into this build context.
 #
