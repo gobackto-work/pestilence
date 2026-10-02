@@ -1,0 +1,22 @@
+# gitleaks configuration.
+#
+# One allowlist entry, and it is a FALSE POSITIVE rather than a real finding: the
+# `private-key` rule matches the literal PEM *header* a test used to assert the
+# encoding, in a commit that predates the fix. A PEM header string is not a key.
+# The test now parses the PEM instead, but history is history, and rewriting it to
+# satisfy a linter would be worse than excluding the hit.
+#
+# Do NOT add entries here without reading the hit first. The rule this repository
+# most needs is the one that would catch a real signing key: pestilence mints every
+# workspace's capability token and holds the Ed25519 private key the broker verifies
+# against, so a leak here is the worst one available.
+title = "pestilence"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "PEM header literal in a test assertion, not a key"
+paths = ['''internal/tenant/token_test\.go''']
+regexTarget = "match"
+regexes = ['''-----BEGIN (PRIVATE|PUBLIC) KEY-----''']

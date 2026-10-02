@@ -1,0 +1,87 @@
+# Lint configuration for both agents and (eventually) CI.
+#
+# The gate is `hack/verify.sh`. Thresholds here are HARD LIMITS, not advice: for
+# an agent a complexity limit is a forcing function -- it makes the code get
+# restructured rather than annotated -- which is why they are set low enough to
+# bite and the failures are not suppressed.
+#
+# Deliberately identical to scarab's, so "verified" means the same thing on both
+# sides of the contract.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Complexity. These are the ones that force restructuring: cognitive
+    # complexity counts nesting and control-flow breaks, which is what actually
+    # makes code hard to change. `gocyclo` is here mostly for continuity.
+    - gocognit
+    - gocyclo
+    - funlen
+    - nestif
+    - maintidx
+    # Duplication WITHIN this module. Cross-repo duplication (the contract
+    # constants, the bundle shapes) is invisible here -- that needs a check across
+    # all the repositories.
+    - dupl
+    # Style and correctness beyond the standard set.
+    - revive
+    - gocritic
+    - misspell
+    - unparam
+    # Security. Expect false positives; see the exclusions below, each of which
+    # is justified rather than blanket-disabled.
+    - gosec
+
+  settings:
+    gocognit:
+      # Lower than the common 30. The reconciler and the bundle builder are where
+      # nesting crept in before, and they are the security-critical code.
+      min-complexity: 20
+    gocyclo:
+      min-complexity: 15
+    funlen:
+      lines: 60
+      statements: 45
+    nestif:
+      min-complexity: 5
+    maintidx:
+      # Maintainability index; below this is "hard to maintain" territory.
+      under: 20
+    dupl:
+      threshold: 150
+
+  exclusions:
+    rules:
+      # Tests may ignore close/write errors, write fixtures with ordinary
+      # permissions, and assert many properties in one function. None of that
+      # says anything about the code under test, and suppressing it in tests is
+      # what keeps the thresholds low enough to bite in production code.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - funlen
+          - dupl
+          - gocognit
+          - gocyclo
+          - gosec
+
+      # In a test helper, `*testing.T` before `context.Context` is idiomatic; the
+      # rule is about production code.
+      - path: _test\.go
+        linters:
+          - revive
+        text: "context-as-argument"
+
+      # gosec false positives, each specific to this repository's subject matter.
+      - linters:
+          - gosec
+        text: "G101"
+        # "Potential hardcoded credentials" fires on the *names* of things: the
+        # data keys "ed25519.pem" and "token" that a Secret is addressed by. It
+        # cannot tell a key's NAME from a key. The signing key itself is generated
+        # at runtime by crypto/rand and never written to the repository.
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
