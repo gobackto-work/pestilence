@@ -1,0 +1,7 @@
+# Keep LF in files whose line endings are functionally significant on Linux.
+#
+# A shell shebang must be LF, and a CRLF Dockerfile or script breaks the build.
+# With core.autocrlf=true the working tree would otherwise hold CRLF.
+
+*.sh text eol=lf
+Dockerfile text eol=lf
