@@ -1,6 +1,6 @@
 # Lint configuration for both agents and (eventually) CI.
 #
-# The gate is `hack/verify.sh`. Thresholds here are HARD LIMITS, not advice: for
+# The gate is `scripts/verify.sh`. Thresholds here are HARD LIMITS, not advice: for
 # an agent a complexity limit is a forcing function -- it makes the code get
 # restructured rather than annotated -- which is why they are set low enough to
 # bite and the failures are not suppressed.

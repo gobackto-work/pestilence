@@ -1,0 +1,13 @@
+apiVersion: v2
+name: pestilence
+description: The control plane for the Pi agent platform.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/gobackto-work/pestilence
+sources:
+  - https://github.com/gobackto-work/pestilence
+keywords:
+  - pi
+  - agents
+  - control-plane

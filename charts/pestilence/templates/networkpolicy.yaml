@@ -1,0 +1,87 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := include "pestilence.namespace" . }}
+# Ingress is a standard NetworkPolicy, because a standard policy expresses it
+# exactly and portability is worth something.
+#
+# Egress is a CiliumNetworkPolicy, because a standard one CANNOT express it here.
+# The control plane reaches the API server through the `kubernetes` Service, which
+# kube-proxy DNATs to the node itself. Cilium enforces egress against the host as an
+# ENTITY, so `ipBlock` rules naming either the Service's ClusterIP or the node's
+# address match nothing -- and the failure is a control plane that stays perfectly
+# Ready while every API call times out. Do not "simplify" this back to an ipBlock.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-town-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # The ONLY permitted caller. `kubernetes.io/metadata.name` is set by the API
+    # server on every namespace and cannot be spoofed by a tenant.
+    #
+    # If the town namespace is ever renamed, this allows nothing and every town API
+    # call times out with no other symptom. That is the intended failure direction.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "pestilence.townNamespace" . }}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The API server, and the only other thing the control plane may reach.
+#
+# Egress is restricted because pestilence is the trusted plane and has no business
+# opening outbound connections anywhere else. This is defence in depth rather than a
+# boundary: a compromised control plane can still exfiltrate by creating a workload
+# that does it, so treat this as raising the cost, not as closing the hole.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-egress-kube-apiserver
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+spec:
+  endpointSelector: {}
+  egress:
+    # `kube-apiserver` is a Cilium entity meaning exactly this and nothing more. It
+    # is preferable to `host`, which would also permit anything else on the node.
+    - toEntities: [kube-apiserver]
+{{- end }}

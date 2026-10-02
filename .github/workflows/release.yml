@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (for example 1.0.0)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # The image name is preserved from the pre-registry flow. The repository is
+  # `pestilence`; the image is `pestilence-control-plane`.
+  IMAGE: ${{ github.repository_owner }}/pestilence-control-plane
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # The image is a static binary and nothing else, so the Dockerfile COPYs a
+      # binary rather than building one. Cross-compile it into the build context
+      # first, exactly as cluster-setup-scripts/load-image.sh does.
+      - name: Cross-compile
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -o image/control-plane/pestilence-control-plane ./cmd/control-plane
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: image/control-plane
+          file: image/control-plane/Dockerfile
+          # arm64 is free on public repositories, via the native ubuntu-24.04-arm
+          # runner. Add it as `linux/amd64,linux/arm64` with a matrix when a reason
+          # appears; the cluster is amd64 today.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install helm
+        run: |
+          bash scripts/install-tools.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Package the chart
+        run: |
+          version="${{ inputs.version || github.ref_name }}"
+          helm package charts/pestilence --version "${version#v}" --app-version "${version#v}" --destination dist/chart
+
+      - name: Push the chart to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            helm registry login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+          helm push dist/chart/pestilence-*.tgz "oci://$REGISTRY/${{ github.repository_owner }}/charts"

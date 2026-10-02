@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pestilence.name" . }}
+  namespace: {{ include "pestilence.namespace" . }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+spec:
+  # ClusterIP only. Nothing outside the cluster can route to a ClusterIP, and no
+  # Ingress references this Service. town reaches it as a workload.
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "pestilence.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

@@ -1,0 +1,139 @@
+# pestilence — the control plane for the Pi agent platform.
+#
+# pestilence is the trusted plane: the only component with cross-namespace
+# privilege. Its RBAC is scoped rather than cluster-wide, and the admission
+# policies in this chart are what make that scoping safe. Do not disable one
+# without the other.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/gobackto-work/pestilence-control-plane
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+
+namespace:
+  create: true
+  name: pestilence
+
+# The namespace the per-workspace brokers run in. The scarab chart owns it; this
+# chart only binds a Role in it.
+scarabNamespace:
+  name: scarab
+
+townNamespace:
+  name: town
+
+serviceAccount:
+  create: true
+  name: pestilence
+
+config:
+  hostnameSuffix: gobackto.work
+  # The fast intent loop, and the slower drift sweep.
+  interval: 10s
+  driftInterval: 5m
+  # Broker transport. It can only be on because scarab serves TLS and verifies the
+  # CA. The scheme in the broker URL flips with this flag, so enabling it against a
+  # plaintext broker fails every call.
+  brokerTls: true
+  assertionPubkeyPath: /var/run/pestilence/assertion-key.pub
+
+# The image references pestilence stamps into every workspace it creates. Changing
+# these changes what NEW workspaces get.
+workspaceImages:
+  agent: ghcr.io/gobackto-work/scarab-agent:1.0.0
+  broker: ghcr.io/gobackto-work/scarab-broker:1.0.0
+
+assertion:
+  # The PUBLIC half of the assertion key pair, made by town's
+  # cluster-setup-scripts/generate-keys.sh. Not sensitive, so a ConfigMap.
+  existingConfigMap: town-assertion-pubkey
+  # Set true to create the ConfigMap when it does not already exist. The chart uses
+  # `lookup`, so an existing ConfigMap is never overwritten.
+  create: false
+  # The PEM public key. Required when create is true and the ConfigMap is absent.
+  publicKey: ""
+
+persistence:
+  # Named explicitly. openebs-hostpath is not the cluster's default StorageClass, so
+  # a PVC that omits this sits Pending forever with no useful event.
+  storageClassName: openebs-hostpath
+  size: 1Gi
+
+service:
+  type: ClusterIP
+  port: 8080
+
+networkPolicy:
+  enabled: true
+
+# The scoped RBAC. The ClusterRoles are pre-created here so pestilence can only
+# bind them, never widen them.
+rbac:
+  create: true
+
+# The admission policies that constrain how the scoped RBAC is used. Removing them
+# makes the scoping void.
+admissionPolicies:
+  enabled: true
+
+# The shared workspace-edge objects. pestilence provisions the Ingresses that use
+# them, so it owns them.
+edge:
+  enabled: true
+  traefikNamespace: traefik
+  # Where town answers ForwardAuth. The port is not optional: town's Service
+  # exposes 8080 and nothing else.
+  townAuthzAddress: http://town.town.svc.cluster.local:8080/authz
+  tlsStore:
+    create: true
+    secretName: wildcard-gobackto-work-tls
+  certificate:
+    create: true
+    secretName: wildcard-gobackto-work-tls
+    issuerRef: letsencrypt-dns01
+    dnsNames:
+      - "*.gobackto.work"
+      - gobackto.work
+  issuers:
+    create: true
+    email: admin@example.com
+    http01Name: letsencrypt
+    dns01Name: letsencrypt-dns01
+    dnsZones:
+      - gobackto.work
+    # The cert-manager namespace and secret holding the DNS provider token. The
+    # operator creates it; it is never a chart value.
+    dnsProviderSecret: digitalocean-dns
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

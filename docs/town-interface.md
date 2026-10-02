@@ -245,7 +245,7 @@ the assertion on town's. Both workspace Ingresses carry
 | assertion TTL | town | 120s; pestilence allows ~60s of skew |
 | the bearer header | town sends, pestilence reads | `Authorization: Bearer <assertion>` |
 | signing algorithm | town | `EdDSA`; pestilence pins it |
-| public key | operator | `ConfigMap/town-assertion-pubkey` in the `pestilence` namespace, made by town's `hack/generate-keys.sh` |
+| public key | operator | `ConfigMap/town-assertion-pubkey` in the `pestilence` namespace, made by town's `cluster-setup-scripts/generate-keys.sh` |
 | error body shape | pestilence | `{"error":{"code","message"}}` |
 
 The key pair is generated once and both halves are deployed. **Replacing one without the

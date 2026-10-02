@@ -1,21 +1,21 @@
 # Verification
 
-The gate is `hack/verify.sh`. One command, identical for every agent and
+The gate is `scripts/verify.sh`. One command, identical for every agent and
 (eventually) for CI:
 
 ```bash
-bash hack/verify.sh          # the gate — seconds
-bash hack/verify.sh --deep   # adds the slow checks
+bash scripts/verify.sh          # the gate — seconds
+bash scripts/verify.sh --deep   # adds the slow checks
 ```
 
 It prints a per-check result and ends with a quotable line:
 
 ```
-verify.sh: 8 passed, 0 failed
-verified: 8 checks, 0 failures
+verify.sh: 11 passed, 0 failed
+verified: 11 checks, 0 failures
 ```
 
-Mirrors `scarab/hack/verify.sh` deliberately: the same design rules and the same
+Mirrors `scarab/scripts/verify.sh` deliberately: the same design rules and the same
 lint thresholds, so "verified" means the same thing on both sides of the contract.
 
 ## The four design rules
@@ -43,6 +43,8 @@ lint thresholds, so "verified" means the same thing on both sides of the contrac
 | `go test -race` | — | data races | **Linux host** (needs cgo) |
 | `govulncheck` | — | known vulnerabilities in dependencies | `go install golang.org/x/vuln/cmd/govulncheck@latest` |
 | `gitleaks` | 8.30.1 | secrets in the tree **and the git history** | release binary |
+| `shellcheck` | 0.11.0 | shell defects in `scripts/` and `cluster-setup-scripts/` | release tarball |
+| `helm lint`, `helm template` | v4 | a chart that does not render | release tarball |
 
 ## The check that matters most here
 
@@ -60,7 +62,6 @@ removing a secret in a later commit does not un-leak it.
 |---|---|
 | `eslint`, `knip`, `jscpd` | no JavaScript |
 | `hadolint` | a Dockerfile exists (`image/control-plane/`) but the check is not wired in yet |
-| `shellcheck` | `hack/*.sh` exist but the check is not wired in yet |
 
 Each is a one-line addition when the artifact appears. Leaving them out now keeps
 the gate honest about what it actually covers.
@@ -73,16 +74,14 @@ concurrently. So the gate has two homes:
 
 | Host | Checks | `-race` |
 |---|---|---|
-| Windows (authoring) | 8 | skipped |
-| Linux host | **9** | **runs** |
+| Windows (authoring) | 11 | skipped |
+| Linux host | **12** | **runs** |
 
-Install the tools on the Linux host — all pure Go, so no root needed:
+Install the tools with `scripts/install-tools.sh`. It installs every pinned version the
+gate asserts, and CI calls the same script:
 
 ```bash
-go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
-go install golang.org/x/tools/cmd/deadcode@latest
-go install golang.org/x/vuln/cmd/govulncheck@latest
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+scripts/install-tools.sh ~/.local/bin
 ```
 
 **gitleaks is the exception: use the release binary, not `go install`.** Two
@@ -99,7 +98,7 @@ curl -sSL -o /tmp/gl.tgz \
 mkdir -p ~/.local/bin && tar -xzf /tmp/gl.tgz -C ~/.local/bin gitleaks
 ```
 
-Verified on the Linux host: `verify.sh: 9 passed, 0 failed`.
+Verified on the Linux host: `verify.sh: 12 passed, 0 failed`.
 
 ## Thresholds are hard limits
 

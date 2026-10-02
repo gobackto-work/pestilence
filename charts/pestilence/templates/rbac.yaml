@@ -1,0 +1,150 @@
+{{- if .Values.rbac.create }}
+{{- $ns := include "pestilence.namespace" . }}
+{{- $sa := include "pestilence.serviceAccountName" . }}
+# The cluster-scoped reach: create namespaces, create the per-workspace RoleBinding,
+# and bind the two pre-created roles. It does NOT carry the tenant-namespace verbs;
+# those live in ClusterRole/pestilence-tenant, which this chart pre-creates so the
+# control plane can only bind it, never widen it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pestilence-provisioner
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+rules:
+  # `patch` is NOT optional: server-side apply is a PATCH against the apply
+  # endpoint, so `create` alone is refused with "cannot patch resource namespaces".
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "update", "patch"]
+  # `bind`, scoped by resource name. A ClusterRole grant cannot be scoped to
+  # "namespaces matching a label", but `bind` CAN be scoped to a resource name.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames: ["pestilence-tenant", "pestilence-platform"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pestilence-provisioner
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pestilence-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $ns }}
+---
+# Tenant-namespace powers. pestilence may bind this, never edit it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pestilence-tenant
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources:
+      - resourcequotas
+      - limitranges
+      - serviceaccounts
+      - persistentvolumeclaims
+      - services
+      - configmaps
+      - secrets
+    verbs: ["create", "get", "update", "patch", "delete"]
+  # pods write is held so pestilence can CREATE the broker's Role: Kubernetes
+  # refuses to let an identity grant a permission it does not itself hold.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+# Platform-namespace powers for the per-workspace broker. Deliberately smaller than
+# pestilence-tenant: no PVCs, Ingress, NetworkPolicy or RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pestilence-platform
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "configmaps", "secrets"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+---
+# The one static binding. pestilence's reach into the broker namespace is granted
+# here, so it never has to create a RoleBinding outside a workspace namespace (which
+# the admission policy would deny, because the broker namespace carries no workspace
+# label). This object lives in the scarab namespace, which the scarab chart creates,
+# so install scarab first.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pestilence-platform
+  namespace: {{ include "pestilence.scarabNamespace" . }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pestilence-platform
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $ns }}
+---
+# The token-signing key lives in pestilence's OWN namespace, so a namespaced Role is
+# enough and no cluster-wide Secret grant is needed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pestilence-signing-keys
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pestilence-signing-keys
+  namespace: {{ $ns }}
+  labels:
+    {{- include "pestilence.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pestilence-signing-keys
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ $ns }}
+{{- end }}

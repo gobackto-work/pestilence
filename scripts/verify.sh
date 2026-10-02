@@ -3,7 +3,7 @@
 # The verification gate for pestilence. One command, identical for every agent and
 # (eventually) for CI.
 #
-# Mirrors scarab's hack/verify.sh deliberately: the same design rules and the same
+# Mirrors scarab's scripts/verify.sh deliberately: the same design rules and the same
 # lint thresholds, so "verified" means the same thing on both sides of the
 # contract.
 #
@@ -20,8 +20,8 @@
 #   * EXIT-CODE DRIVEN, with a quotable summary line.
 #
 # Usage:
-#   hack/verify.sh            # the gate
-#   hack/verify.sh --deep     # adds the slow checks
+#   scripts/verify.sh            # the gate
+#   scripts/verify.sh --deep     # adds the slow checks
 #
 # Tools and the versions this was derived with:
 #
@@ -33,7 +33,7 @@
 #
 # Not here, deliberately: no eslint/knip/jscpd (no JavaScript). `hadolint` and
 # `shellcheck` are not wired in yet, though `image/control-plane/Dockerfile` and
-# `hack/*.sh` now exist — add both.
+# `scripts/*.sh` and `cluster-setup-scripts/*.sh` now exist — add both.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -94,6 +94,8 @@ require staticcheck "$(staticcheck -version 2>&1)" "2026.2.1" || true
 require golangci-lint "$(golangci-lint --version 2>&1)" "2.14.0" || true
 require govulncheck "$(govulncheck -version 2>&1 | head -1)" "go1.27" || true
 require gitleaks "$(gitleaks version 2>&1)" "8.30.1" || true
+require shellcheck "$(shellcheck --version 2>&1 | sed -n 's/^version: //p')" "0.11.0" || true
+require helm "$(helm version --short 2>&1)" "v4" || true
 
 step "go: format, vet, lint, dead code"
 check_quiet "gofmt" gofmt -l .
@@ -113,6 +115,11 @@ else
 	printf '  \033[33mskip\033[0m go test -race (CGO_ENABLED=0; needs gcc -- run on the Linux host)\n'
 fi
 check "govulncheck" govulncheck ./...
+
+step "scripts and chart"
+check "shellcheck (scripts and setup scripts)" shellcheck -s bash scripts/*.sh cluster-setup-scripts/*.sh
+check "helm lint" helm lint charts/pestilence
+check "helm template" helm template pestilence charts/pestilence
 
 step "secrets"
 # The single most valuable check in this repository. pestilence mints each
