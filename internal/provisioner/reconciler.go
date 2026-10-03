@@ -96,6 +96,55 @@ func (r *Reconciler) Ensure(ctx context.Context, spec tenant.Spec) error {
 	return nil
 }
 
+// PublicKey returns the public key that signs one workspace's capability token.
+//
+// The control plane minted that keypair, so it derives the public key from the private
+// key it already holds in its own namespace. It never reads a tenant namespace for it:
+// a tenant holds the public key, and a tenant that held the private key could mint its
+// own tokens.
+//
+// There is no cache. This is a Secret read in the request path, and the record carries a
+// few hundred events a week, so a cache would buy nothing measurable and would serve a
+// stale key after a regeneration.
+func (r *Reconciler) PublicKey(ctx context.Context, slug string) (ed25519.PublicKey, error) {
+	s := tenant.Spec{Slug: slug}.Normalized()
+	secret, err := r.dyn.Resource(secretsGVR).Namespace(s.ControlPlaneNamespace).
+		Get(ctx, s.TokenKeySecretName(), metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get token key secret for %s: %w", slug, err)
+	}
+	encoded, ok := secretDataValue(secret, tenant.TokenPrivateKeyKey)
+	if !ok {
+		return nil, fmt.Errorf("token key secret for %s has no %s", slug, tenant.TokenPrivateKeyKey)
+	}
+	priv, err := tenant.ParsePrivateKey(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("parse token key for %s: %w", slug, err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("token key for %s is not an Ed25519 key", slug)
+	}
+	return pub, nil
+}
+
+// secretDataValue decodes one base64 value out of an unstructured Secret.
+func secretDataValue(secret *unstructured.Unstructured, key string) (string, bool) {
+	data, ok := secret.Object["data"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	encoded, ok := data[key].(string)
+	if !ok {
+		return "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
 // ensureSigningMaterial loads the workspace's signing key, generating it once if
 // it does not exist.
 //

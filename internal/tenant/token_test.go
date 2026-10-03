@@ -19,9 +19,9 @@ func materialSpec() Spec {
 // does not read as "not valid yet" or "expired" depending on when the test runs.
 func verifyAt(t *testing.T, token string, pub ed25519.PublicKey, at time.Time) jwt.MapClaims {
 	t.Helper()
-	claims, err := VerifyToken(token, pub, jwt.WithTimeFunc(func() time.Time { return at }))
+	claims, err := verifyTokenClaims(token, pub, jwt.WithTimeFunc(func() time.Time { return at }))
 	if err != nil {
-		t.Fatalf("VerifyToken: %v", err)
+		t.Fatalf("verifyTokenClaims: %v", err)
 	}
 	return claims
 }
@@ -130,7 +130,7 @@ func TestTokenDoesNotVerifyWithAnotherWorkspacesKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParsePublicKey: %v", err)
 	}
-	if _, err := VerifyToken(a.Token, pubB, jwt.WithTimeFunc(func() time.Time { return now })); err == nil {
+	if _, err := verifyTokenClaims(a.Token, pubB, jwt.WithTimeFunc(func() time.Time { return now })); err == nil {
 		t.Error("a token verified against a different workspace's public key")
 	}
 }

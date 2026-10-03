@@ -9,18 +9,21 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Helpers for verifying what pestilence mints. They live in the test package on
-// purpose: nothing in the control plane verifies its own tokens -- the broker
-// does, in another repository -- so as production code they were unreachable, and
-// the gate said so.
+// Helpers for inspecting what pestilence mints.
+//
+// The control plane does verify a workspace token of its own now: the ingest endpoint
+// accepts one, so tenant.VerifyToken is production code with a real caller. This helper
+// stays because it answers a different question. It pins EdDSA the way the broker does
+// and hands back the raw claims, so a test can assert claim by claim that the broker in
+// the other repository will accept what we mint.
 
-// VerifyToken parses and verifies a token against a workspace public key, pinning
+// verifyTokenClaims parses and verifies a token against a workspace public key, pinning
 // EdDSA exactly as the broker does.
 //
 // Parser options are accepted so a caller can control the clock. Without that, a
 // token minted at a fixed time in a test reads as "not valid yet" or "expired"
 // depending only on when the test happens to run.
-func VerifyToken(token string, pub ed25519.PublicKey, opts ...jwt.ParserOption) (jwt.MapClaims, error) {
+func verifyTokenClaims(token string, pub ed25519.PublicKey, opts ...jwt.ParserOption) (jwt.MapClaims, error) {
 	claims := jwt.MapClaims{}
 	opts = append(opts, jwt.WithValidMethods([]string{jwt.SigningMethodEdDSA.Alg()}))
 	_, err := jwt.ParseWithClaims(token, claims, func(*jwt.Token) (any, error) {
