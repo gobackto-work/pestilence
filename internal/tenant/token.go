@@ -212,6 +212,55 @@ func randomID(nBytes int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// Claims are the workspace capability-token claims.
+type Claims struct {
+	Workspace string `json:"workspace"`
+	Namespace string `json:"namespace"`
+	Role      string `json:"role"`
+
+	jwt.RegisteredClaims
+}
+
+// VerifyToken checks a workspace capability token and returns its claims.
+//
+// The caller supplies the public key of the workspace it expects, because the key is per
+// workspace and this package holds none of its own. The workspace and the namespace are
+// checked against the caller's expectations, so a token minted for one workspace is not
+// accepted for another.
+//
+// Every rejection returns the same shape of error. The caller collapses them into one
+// response, so a probing client learns nothing about which check failed.
+func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespace string, now time.Time) (Claims, error) {
+	var claims Claims
+	if len(pub) != ed25519.PublicKeySize {
+		return Claims{}, fmt.Errorf("verification key is %d bytes, want %d", len(pub), ed25519.PublicKeySize)
+	}
+	if _, err := jwt.ParseWithClaims(raw, &claims,
+		func(*jwt.Token) (any, error) { return pub, nil },
+		// Pinned, for the same reason the broker pins it: a parser that accepts the
+		// algorithm the token claims accepts an HMAC forged with the public key.
+		jwt.WithValidMethods([]string{"EdDSA"}),
+		jwt.WithIssuer(TokenIssuer),
+		// An audience is a set. The token is accepted wherever it names.
+		jwt.WithAudience(audience),
+		// A token with no expiry would be valid for ever.
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(func() time.Time { return now }),
+	); err != nil {
+		return Claims{}, fmt.Errorf("token: %w", err)
+	}
+	if claims.Workspace != workspace {
+		return Claims{}, fmt.Errorf("token: workspace %q is not %q", claims.Workspace, workspace)
+	}
+	if claims.Namespace != namespace {
+		return Claims{}, fmt.Errorf("token: namespace %q is not %q", claims.Namespace, namespace)
+	}
+	if claims.Role != TokenRoleRoot {
+		return Claims{}, fmt.Errorf("token: role %q may not report", claims.Role)
+	}
+	return claims, nil
+}
+
 // TokenRotationDivisor sets how much of the TTL must remain for a token to count as
 // fresh. A token is re-minted once less than half its life is left, so rotation
 // happens with as much margin as the TTL allows for the control plane to be down.

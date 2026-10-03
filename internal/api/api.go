@@ -15,6 +15,7 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/eventlog"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -50,6 +52,30 @@ type Config struct {
 
 	// HostnameSuffix is appended to the slug, e.g. "gobackto.work".
 	HostnameSuffix string
+
+	// Events records a state transition that a workspace's runtime reports. Required
+	// for the ingest endpoint.
+	Events EventAppender
+
+	// TokenKeys resolves the public key that signs one workspace's capability token,
+	// by slug. Required for the ingest endpoint.
+	TokenKeys TokenKeySource
+}
+
+// EventAppender records one reported state transition. eventlog.Log satisfies it.
+//
+// It is an interface and not the concrete type so that this package does not depend on
+// where the record is stored, and so that a test can refuse a write deliberately.
+type EventAppender interface {
+	Append(ctx context.Context, r eventlog.Report) (eventlog.AppendResult, error)
+}
+
+// TokenKeySource resolves the public key that signs one workspace's capability token.
+//
+// The key is per workspace. The control plane minted it, so an implementation reads it
+// back from the control plane's own Secret and never from a tenant namespace.
+type TokenKeySource interface {
+	PublicKey(ctx context.Context, slug string) (ed25519.PublicKey, error)
 }
 
 // Server is the control plane's HTTP handler.
@@ -75,6 +101,9 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	if cfg.Verifier == nil {
 		panic("api.New: Config.Verifier is required")
 	}
+	if cfg.Events == nil || cfg.TokenKeys == nil {
+		panic("api.New: Config.Events and Config.TokenKeys are required by the ingest endpoint")
+	}
 	srv := &Server{store: s, cfg: cfg, log: log, mux: http.NewServeMux()}
 
 	// Unauthenticated, and not only for probes: town's readiness check calls this,
@@ -90,6 +119,12 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	// The ForwardAuth decision for tenant endpoints. Traefik asks town, town asks
 	// this, and this holds the ownership rule because it holds the records.
 	srv.mux.HandleFunc("POST /api/authorize", srv.requireOwner(srv.handleAuthorize))
+
+	// A workspace's runtime reports that one of its runs changed state. The caller
+	// holds that workspace's capability token, which is a different principal from
+	// town's assertion: town's says which user is asking, and this says which runtime is
+	// reporting.
+	srv.mux.HandleFunc("POST /api/workspaces/{id}/events", srv.requireReporter(srv.handleAppendEvent))
 
 	return srv
 }

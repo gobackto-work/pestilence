@@ -60,7 +60,7 @@ func TestTheTokenNamesTheBrokerAndTheIngest(t *testing.T) {
 	spec := Spec{Slug: "amber-shrew-uucs", OwnerID: "owner-1"}.Normalized()
 	token, pub := mintForTest(t, spec, now)
 
-	claims, err := VerifyToken(token, pub, jwt.WithTimeFunc(func() time.Time { return now }))
+	claims, err := verifyTokenClaims(token, pub, jwt.WithTimeFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestTheTokenStillCarriesTheWorkspaceAndTheRole(t *testing.T) {
 	spec := Spec{Slug: "amber-shrew-uucs", OwnerID: "owner-1"}.Normalized()
 	token, pub := mintForTest(t, spec, now)
 
-	claims, err := VerifyToken(token, pub, jwt.WithTimeFunc(func() time.Time { return now }))
+	claims, err := verifyTokenClaims(token, pub, jwt.WithTimeFunc(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestAnExpiredTokenIsRefused(t *testing.T) {
 	spec := Spec{Slug: "amber-shrew-uucs", OwnerID: "owner-1"}.Normalized()
 	token, pub := mintForTest(t, spec, time.Now().Add(-2*DefaultTokenTTL))
 
-	if _, err := VerifyToken(token, pub); err == nil {
+	if _, err := verifyTokenClaims(token, pub); err == nil {
 		t.Fatal("an expired token verified")
 	}
 }

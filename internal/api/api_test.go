@@ -15,6 +15,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"github.com/gobackto-work/pestilence/internal/auth"
+	"github.com/gobackto-work/pestilence/internal/eventlog"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -30,9 +31,27 @@ func newServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	srv := New(s, Config{Verifier: testVerifier(t), HostnameSuffix: "gobackto.work"},
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(s, Config{
+		Verifier:       testVerifier(t),
+		HostnameSuffix: "gobackto.work",
+		Events:         newEventLog(t),
+		// Empty. A test that exercises the ingest endpoint supplies its own, because
+		// the key is per workspace and this helper knows no workspace.
+		TokenKeys: keyring{},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return srv, s
+}
+
+// newEventLog opens a record in a temporary file. Every server needs one, because the
+// ingest endpoint is wired up whenever it is constructed.
+func newEventLog(t *testing.T) *eventlog.Log {
+	t.Helper()
+	l, err := eventlog.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatalf("open event record: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l
 }
 
 // The owner every assertion in these tests names. A GitHub numeric id, because
