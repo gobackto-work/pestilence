@@ -110,10 +110,14 @@ kind needs a change to this document.
 | `run.started` | — | `running` | no |
 | `run.waiting` | `running` | `waiting` | yes |
 | `run.resumed` | `waiting` | `running` | no |
-| `run.succeeded` | `running` | `succeeded` | yes |
-| `run.failed` | `running` | `failed` | yes |
+| `run.succeeded` | `running`, `waiting` | `succeeded` | yes |
+| `run.failed` | `running`, `waiting` | `failed` | yes |
 | `run.cancelled` | `running`, `waiting` | `cancelled` | yes |
-| `run.budget_exhausted` | `running` | `budget_exhausted` | yes |
+| `run.budget_exhausted` | `running`, `waiting` | `budget_exhausted` | yes |
+
+Every non-terminal state reaches every terminal state. A run can fail, be cancelled or
+exhaust its budget while it is waiting for a person, and a table that allowed only
+`running` would refuse a report that the runtime is entitled to make.
 
 The Notifiable column is the closed vocabulary for features 3 and 4. A `run.resumed`
 event is recorded so that a subscriber can reconstruct the state, and it is not sent to a
@@ -347,7 +351,9 @@ Deletion wins over delivery. A subscriber must not treat a gap as an error.
 
 ## Deletion
 
-Deleting a workspace deletes its runs, its events and its subscriptions.
+Deleting a workspace deletes its runs, its events, and the deliveries for those events.
+A subscription survives, because it belongs to a principal and outlives any one workspace
+of that principal.
 
 There is no history of a deleted workspace. The transcript lives on the workspace volume
 and is removed with the namespace. A person who needs long-term history needs a feature
@@ -355,23 +361,31 @@ that does not exist yet.
 
 ## Delivery to a sink
 
-Each sink has a delivery row per event, with a state of `pending`, `delivered` or
-`failed`.
+A delivery row records an attempt. It is not created when an event is appended, because
+the cursor already says what is outstanding. Appending therefore costs one write, and a
+new subscription receives the backlog without a row for every event it has not taken
+yet.
 
 - The control plane retries a failed delivery with backoff.
 - A delivery that exceeds the backoff limit is marked `failed` and reported as a metric.
   It is not retried again without an operator action.
-- Every delivery is signed. The signature covers the payload, a timestamp and a nonce.
-  A receiver can therefore verify the control plane and detect a replay.
+- Every delivery is signed with HMAC-SHA256 over the timestamp, the nonce and the body,
+  keyed by the subscription's secret. A receiver can therefore verify the control plane
+  and detect a replay.
 
-### The SNS sink
+### The town sink
 
-The control plane does not call SNS. It delivers the event to town, and town calls SNS.
-town holds the user and the device registration, so town owns the credentials and the
-per-user policy.
+The control plane does not call SNS. town takes the events and calls SNS, because town
+holds the user and the device registration, so town owns the credentials and the per-user
+policy.
 
-The control plane must send town an idempotency key, so that a duplicate delivery does
-not send two notifications.
+town reads the events with a cursor, over the same authenticated API it already calls.
+The control plane does not call town. A push from the control plane to town would need a
+second credential, and it would make the control plane a caller of the component that is
+meant to be holding it to account.
+
+Every event carries an idempotency key, so a duplicate delivery does not send two
+notifications.
 
 ### The MCP sink
 
@@ -448,7 +462,7 @@ These are testable. Each one has a test.
 5. An event is not delivered to a subscription whose principal is not entitled to its
    workspace.
 6. An `attributes` map contains no value from the forbidden list.
-7. Deleting a workspace removes its runs, events and subscriptions.
+7. Deleting a workspace removes its runs and its events.
 8. A callback to a private address is refused.
 
 ## Out of scope
