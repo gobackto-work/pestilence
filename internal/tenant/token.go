@@ -127,6 +127,15 @@ func NewSigningMaterial(spec Spec, now time.Time) (SigningMaterial, error) {
 	}, nil
 }
 
+// TokenAudienceIngest is the audience that the event-record ingest endpoint requires.
+//
+// It is an extra audience on the same token and not a second token. The root agent
+// holds the token and the root agent is the reporter, so a second token would be held
+// by the same process and would separate nothing. What this does buy is the rule that
+// a token minted for one service is refused at another, which matters as soon as a
+// second service mints tokens.
+const TokenAudienceIngest = "pestilence-ingest"
+
 // MintToken issues the workspace capability token with the claims pinned in §6.2.
 func MintToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error) {
 	s := spec.Normalized()
@@ -147,7 +156,7 @@ func MintToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error
 	claims := jwt.MapClaims{
 		"iss":       TokenIssuer,
 		"sub":       "pi-root@" + s.Namespace(),
-		"aud":       s.BrokerServiceName(),
+		"aud":       jwt.ClaimStrings{s.BrokerServiceName(), TokenAudienceIngest},
 		"workspace": s.Slug,
 		"namespace": s.Namespace(),
 		"role":      TokenRoleRoot,

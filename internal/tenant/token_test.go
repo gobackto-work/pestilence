@@ -44,7 +44,6 @@ func TestMintedTokenCarriesThePinnedClaims(t *testing.T) {
 	want := map[string]string{
 		"iss":       TokenIssuer,
 		"sub":       "pi-root@" + Namespace(slug),
-		"aud":       spec.Normalized().BrokerServiceName(),
 		"workspace": slug,
 		"namespace": Namespace(slug),
 		"role":      TokenRoleRoot,
@@ -53,6 +52,23 @@ func TestMintedTokenCarriesThePinnedClaims(t *testing.T) {
 		if got, _ := claims[k].(string); got != v {
 			t.Errorf("claim %q = %q, want %q", k, got, v)
 		}
+	}
+
+	// The audience is a set and not a string, because the token is accepted at the
+	// broker and at the control plane's own ingest endpoint. The broker checks
+	// membership (jwt.WithAudience), so membership is what is pinned here. This claim is
+	// read by the broker in the other repository, and the shape changed when the second
+	// audience was added.
+	broker := spec.Normalized().BrokerServiceName()
+	named := false
+	for _, aud := range audiences(t, claims) {
+		if aud == broker {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the token does not name the broker %q, so it would refuse it. audiences: %v",
+			broker, audiences(t, claims))
 	}
 	if claims["jti"] == "" || claims["jti"] == nil {
 		t.Error("jti must be set")
