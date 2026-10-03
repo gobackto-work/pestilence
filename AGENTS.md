@@ -1,7 +1,25 @@
 # AGENTS.md
 
-How to write documentation in this project. These rules apply to every repository
-in the platform: `town`, `pestilence`, `scarab`, and `my-opps`.
+How to work in this project, and how to write its documentation. These rules apply
+to every repository in the platform: `town`, `pestilence`, `scarab`, `my-opps`, and
+`helm-charts`.
+
+## Ask before you push
+
+A local change is easy to undo. A push is not. It is public, it starts CI, and a tag
+publishes an image or a chart. So:
+
+- Do not push unless the task says to push or publish. "Prepare the release" and
+  "cut v1.0.1" are not permission to push.
+- Keep editing, committing, and tagging separate. Do not combine them in one command.
+- Do not create or push a tag without an explicit instruction.
+- Stop before a push. Report the branch, and the tag if there is one. Then wait.
+- A commit is not a push. Commit to keep a change set coherent, say that you did, and
+  leave the push to the operator.
+- Deleting is the same category: a remote branch, a tag, a published package, or a
+  cluster object.
+- A cluster change needs a task that asks for it. Say what you will run before you run
+  it.
 
 ## Two registers, and no mixing
 
