@@ -20,6 +20,7 @@ import (
 
 	"github.com/gobackto-work/pestilence/internal/api"
 	"github.com/gobackto-work/pestilence/internal/controller"
+	"github.com/gobackto-work/pestilence/internal/eventlog"
 	"github.com/gobackto-work/pestilence/internal/provisioner"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
@@ -34,6 +35,7 @@ func main() {
 	var (
 		addr        = flag.String("addr", ":8080", "HTTP listen address")
 		dbPath      = flag.String("db", "/var/lib/pestilence/pestilence.db", "SQLite database path")
+		eventPath   = flag.String("event-db", "/var/lib/pestilence/events.db", "SQLite event record path")
 		kubeconfig  = flag.String("kubeconfig", "", "kubeconfig path; empty uses in-cluster config")
 		brokerImage = flag.String("broker-image", os.Getenv("PESTILENCE_BROKER_IMAGE"), "broker image ref")
 		agentImage  = flag.String("agent-image", os.Getenv("PESTILENCE_AGENT_IMAGE"), "agent image ref")
@@ -53,6 +55,7 @@ func main() {
 	if err := run(opts{
 		addr:            *addr,
 		dbPath:          *dbPath,
+		eventPath:       *eventPath,
 		kubeconfig:      *kubeconfig,
 		brokerImage:     *brokerImage,
 		agentImage:      *agentImage,
@@ -74,6 +77,7 @@ func main() {
 type opts struct {
 	addr            string
 	dbPath          string
+	eventPath       string
 	kubeconfig      string
 	brokerImage     string
 	agentImage      string
@@ -88,6 +92,45 @@ type opts struct {
 	deletionTimeout time.Duration
 }
 
+// openStores opens the registry and the event record, and returns a function that closes
+// both.
+//
+// They are separate files on purpose. The registry is read-mostly and holds a row per
+// workspace; the record is append-heavy and holds a row per transition. One file with one
+// writer would make them contend for one lock.
+func openStores(o opts) (*store.SQLite, *eventlog.Log, func(), error) {
+	st, err := store.OpenSQLite(o.dbPath)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open store: %w", err)
+	}
+	events, err := eventlog.Open(o.eventPath)
+	if err != nil {
+		_ = st.Close()
+		return nil, nil, nil, fmt.Errorf("open event record: %w", err)
+	}
+	return st, events, func() { _ = events.Close(); _ = st.Close() }, nil
+}
+
+// checkStartup refuses a configuration that would fail later and confusingly.
+func checkStartup(o opts, log *slog.Logger) error {
+	// A TTL below the minimum lets the mounted token expire before the kubelet replaces
+	// it, and the symptom appears later as a broker rejecting an agent for no visible
+	// reason.
+	if o.tokenTTL > 0 && o.tokenTTL < tenant.MinimumTokenTTL {
+		return fmt.Errorf("token TTL %s is below the %s minimum: the kubelet refreshes a mounted Secret on its own schedule, so a shorter margin expires the token before the agent sees the new one", o.tokenTTL, tenant.MinimumTokenTTL)
+	}
+
+	if o.brokerImage == "" || o.agentImage == "" {
+		// Worth saying out loud: without images the boundary is provisioned but no
+		// runtime or broker is, so a workspace reaches RUNNING with nothing serving its
+		// endpoint. That is the intended behaviour while §8.6 is unresolved, and it is
+		// confusing if it happens silently.
+		log.Warn("image refs not configured; the broker and root agent Deployments will be omitted",
+			"brokerImage", o.brokerImage, "agentImage", o.agentImage)
+	}
+	return nil
+}
+
 func run(o opts, log *slog.Logger) error {
 	cfg, err := kubeConfig(o.kubeconfig)
 	if err != nil {
@@ -98,26 +141,14 @@ func run(o opts, log *slog.Logger) error {
 		return fmt.Errorf("kubernetes client: %w", err)
 	}
 
-	st, err := store.OpenSQLite(o.dbPath)
+	st, events, closeStores, err := openStores(o)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return err
 	}
-	defer func() { _ = st.Close() }()
+	defer closeStores()
 
-	// Fail at startup, not at the first workspace that breaks. A TTL below the
-	// minimum lets the mounted token expire before the kubelet replaces it, and the
-	// symptom appears later as a broker rejecting an agent for no visible reason.
-	if o.tokenTTL > 0 && o.tokenTTL < tenant.MinimumTokenTTL {
-		return fmt.Errorf("token TTL %s is below the %s minimum: the kubelet refreshes a mounted Secret on its own schedule, so a shorter margin expires the token before the agent sees the new one", o.tokenTTL, tenant.MinimumTokenTTL)
-	}
-
-	if o.brokerImage == "" || o.agentImage == "" {
-		// Worth saying out loud: without images the boundary is provisioned but no
-		// runtime or broker is, so a workspace reaches RUNNING with nothing serving
-		// its endpoint. That is the intended behaviour while §8.6 is unresolved,
-		// and it is confusing if it happens silently.
-		log.Warn("image refs not configured; the broker and root agent Deployments will be omitted",
-			"brokerImage", o.brokerImage, "agentImage", o.agentImage)
+	if err := checkStartup(o, log); err != nil {
+		return err
 	}
 
 	// Built before the controller, because the controller publishes the key into every
@@ -138,7 +169,14 @@ func run(o opts, log *slog.Logger) error {
 		BrokerTLS:             o.brokerTLS,
 	}, o.interval, log)
 
-	srv := api.New(st, api.Config{Verifier: verifier, HostnameSuffix: o.hostSuffix}, log)
+	srv := api.New(st, api.Config{
+		Verifier:       verifier,
+		HostnameSuffix: o.hostSuffix,
+		Events:         events,
+		// The provisioner already reads and writes the token-key Secrets, and it is
+		// the only thing that knows their names and their namespace.
+		TokenKeys: prov,
+	}, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

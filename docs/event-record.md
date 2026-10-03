@@ -156,6 +156,31 @@ does not infer a state, and the agent does not hold a credential for the control
 The broker must treat a report as successful only when it receives a `sequence`. On a
 timeout the broker retries with the same `event_id`.
 
+### The endpoint
+
+    POST /api/workspaces/{id}/events
+
+The body names the run and the state:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `event_id` | yes | The idempotency key. A retry carries the same value. |
+| `run_id` | yes | The run. Its format belongs to the runtime. |
+| `state` | yes | The state the run entered. |
+| `occurred_at` | yes | RFC 3339, when the runtime observed the transition. |
+| `attributes` | no | The closed payload. |
+
+The body cannot name the workspace or the owner. Both come from the record, so a runtime
+cannot report for another workspace or attribute its run to another user.
+
+The answer is `202` with the assigned sequence:
+
+    {"sequence": 41, "appended": true}
+
+A state the record already holds answers with the sequence that set it and `appended`
+false, so a re-assertion reads as success. A state the run cannot reach answers `409`, and
+the runtime asserts its current state on its next report.
+
 ### A transition that the control plane does not accept
 
 The broker drops an event that the control plane does not accept, and it does not buffer
@@ -182,15 +207,19 @@ cheap to discard. A duplicate event in the record is not.
 
 ### Authentication of the write
 
-The runtime presents the workspace capability token, which already exists. Two changes
-are necessary:
+The runtime presents the workspace capability token, which already exists. The token
+carries the broker's service name and `pestilence-ingest` as audiences, and this endpoint
+requires the second.
 
-- The token must carry an audience for this endpoint. A token minted for the broker must
-  not be accepted here.
-- The token must carry the reporting role. Do not accept a role that may orchestrate.
+This is not a separation of principals. The token belongs to the root agent, and the root
+agent is the reporter: it is the only party that can tell a finished run from a run that
+is waiting for a person. A second token would be held by the same process and would
+separate nothing. What the audience buys is the rule that a token minted for one service
+is refused at another, which starts to matter as soon as a second service mints tokens.
 
-The control plane verifies the token against the workspace public key. It does not hold
-the signing key for a tenant namespace either, and it must not start to.
+The control plane derives the workspace public key from the signing key it already holds
+in its own namespace. It never reads a tenant namespace for it, and it never holds
+anything that would let a tenant mint a token.
 
 ## The read path
 

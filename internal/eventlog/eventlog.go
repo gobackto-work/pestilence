@@ -283,14 +283,26 @@ type Report struct {
 	Attributes map[string]any
 }
 
+// opaqueID bounds an identifier that another component generates.
+//
+// It is a bound and not a format. The run id belongs to the runtime and the owner id
+// belongs to town, so pinning either shape here would couple the record to a decision in
+// another repository. What it refuses is the value that actually breaks a row: an empty
+// one, or one long enough to be carrying something.
+var opaqueID = regexp.MustCompile(`^[A-Za-z0-9._:#@-]{1,128}$`)
+
 // Validate refuses a malformed report at the boundary.
 func (r Report) Validate() error {
+	// The workspace is ours, so its identifier format is pinned. The others are not.
+	if err := checkID(r.WorkspaceID); err != nil {
+		return fmt.Errorf("%w: workspace id %q", ErrInvalid, r.WorkspaceID)
+	}
 	// Ordered, so that a report with more than one bad field always reports the same
 	// one. A map here would make the error depend on iteration order.
 	for _, f := range []struct{ name, value string }{
-		{"event", r.ID}, {"run", r.RunID}, {"workspace", r.WorkspaceID}, {"owner", r.OwnerID},
+		{"event", r.ID}, {"run", r.RunID}, {"owner", r.OwnerID},
 	} {
-		if _, err := ulid.Parse(f.value); err != nil {
+		if !opaqueID.MatchString(f.value) {
 			return fmt.Errorf("%w: %s id %q", ErrInvalid, f.name, f.value)
 		}
 	}
