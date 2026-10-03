@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    "docker:pinDigests"
+  ],
+  "packageRules": [
+    {
+      "description": "The k8s.io modules track the cluster's Kubernetes version, which is v1.36. v0.37 exists and the cluster does not, so take patches within the current minor. Moving the minor is a deliberate change: the modules and their transitive pins move together, and a partial move does not compile.",
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "/^k8s\\.io\\//"
+      ],
+      "allowedVersions": "<0.37.0"
+    },
+    {
+      "description": "The structured-merge-diff major is chosen by k8s.io/apimachinery, not by us. v7 does not compile against apimachinery v0.36; that failure is what this prevents.",
+      "matchDatasources": [
+        "go"
+      ],
+      "matchPackageNames": [
+        "/^sigs\\.k8s\\.io\\/structured-merge-diff/"
+      ],
+      "enabled": false
+    },
+    {
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "groupName": "base image"
+    }
+  ]
+}

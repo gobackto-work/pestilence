@@ -44,7 +44,7 @@ lint thresholds, so "verified" means the same thing on both sides of the contrac
 | `govulncheck` | — | known vulnerabilities in dependencies | `go install golang.org/x/vuln/cmd/govulncheck@latest` |
 | `gitleaks` | 8.30.1 | secrets in the tree **and the git history** | release binary |
 | `shellcheck` | 0.11.0 | shell defects in `scripts/` and `cluster-setup-scripts/` | release tarball |
-| `helm lint`, `helm template` | v4 | a chart that does not render | release tarball |
+| `hadolint` | 2.15.1 | Dockerfile defects | release binary |
 
 ## The check that matters most here
 
@@ -61,7 +61,6 @@ removing a secret in a later commit does not un-leak it.
 | Missing | Reason |
 |---|---|
 | `eslint`, `knip`, `jscpd` | no JavaScript |
-| `hadolint` | a Dockerfile exists (`image/control-plane/`) but the check is not wired in yet |
 
 Each is a one-line addition when the artifact appears. Leaving them out now keeps
 the gate honest about what it actually covers.

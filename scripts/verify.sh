@@ -95,7 +95,24 @@ require golangci-lint "$(golangci-lint --version 2>&1)" "2.14.0" || true
 require govulncheck "$(govulncheck -version 2>&1 | head -1)" "go1.27" || true
 require gitleaks "$(gitleaks version 2>&1)" "8.30.1" || true
 require shellcheck "$(shellcheck --version 2>&1 | sed -n 's/^version: //p')" "0.11.0" || true
-require helm "$(helm version --short 2>&1)" "v4" || true
+
+step "tool installer"
+# Every tool the gate REQUIRES must also be installed by scripts/install-tools.sh. A
+# tool the installer omits falls back to whatever the runner image happens to ship --
+# which is how shellcheck 0.9.0 (ubuntu-24.04) shadowed the required 0.11.0: green on
+# a developer host, red in CI. The gate is the same everywhere, or it is not a gate.
+missing=""
+while read -r tool; do
+	case "$tool" in
+	go | node | gofmt) continue ;; # from the toolchain, not the installer
+	esac
+	grep -q -- "$tool" scripts/install-tools.sh || missing="$missing $tool"
+done < <(sed -n 's/^require \([A-Za-z][A-Za-z0-9_-]*\) .*/\1/p' scripts/verify.sh | sort -u)
+if [ -n "$missing" ]; then
+	bad "scripts/install-tools.sh does not install:$missing"
+else
+	ok "scripts/install-tools.sh covers every required tool"
+fi
 
 step "go: format, vet, lint, dead code"
 check_quiet "gofmt" gofmt -l .
@@ -116,10 +133,9 @@ else
 fi
 check "govulncheck" govulncheck ./...
 
-step "scripts and chart"
+step "scripts and dockerfile"
 check "shellcheck (scripts and setup scripts)" shellcheck -s bash scripts/*.sh cluster-setup-scripts/*.sh
-check "helm lint" helm lint charts/pestilence
-check "helm template" helm template pestilence charts/pestilence
+check "hadolint (Dockerfile)" hadolint image/control-plane/Dockerfile
 
 step "secrets"
 # The single most valuable check in this repository. pestilence mints each

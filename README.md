@@ -27,10 +27,11 @@ go run ./cmd/render-bundle -slug demo
 
 ## Deploying
 
+The Helm chart lives in [helm-charts](https://github.com/gobackto-work/helm-charts). This repository builds and publishes an image; that repository names the version it deploys.
+
 ```sh
-helm install pestilence oci://ghcr.io/gobackto-work/charts/pestilence --version 1.0.0
+helm install platform oci://ghcr.io/gobackto-work/charts/platform --version 1.0.0
 ```
 
-The chart carries the scoped RBAC and the admission policies that make it safe. Install [scarab](https://github.com/gobackto-work/scarab) first: this chart binds a Role in the broker namespace, which that chart owns.
 
 See [Security hardening](docs/security-hardening.md) for the security model and remaining work.

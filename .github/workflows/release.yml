@@ -3,11 +3,6 @@ name: release
 on:
   push:
     tags: ["v*.*.*"]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, without the leading v (for example 1.0.0)"
-        required: true
 
 permissions:
   contents: read
@@ -79,23 +74,3 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  chart:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install helm
-        run: |
-          bash scripts/install-tools.sh "$RUNNER_TEMP/bin"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-
-      - name: Package the chart
-        run: |
-          version="${{ inputs.version || github.ref_name }}"
-          helm package charts/pestilence --version "${version#v}" --app-version "${version#v}" --destination dist/chart
-
-      - name: Push the chart to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" |
-            helm registry login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
-          helm push dist/chart/pestilence-*.tgz "oci://$REGISTRY/${{ github.repository_owner }}/charts"
