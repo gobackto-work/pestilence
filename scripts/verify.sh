@@ -31,9 +31,11 @@
 #   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 #   plus the binary: gitleaks 8.30.1
 #
-# Not here, deliberately: no eslint/knip/jscpd (no JavaScript). `hadolint` and
-# `shellcheck` are not wired in yet, though `image/control-plane/Dockerfile` and
-# `scripts/*.sh` and `cluster-setup-scripts/*.sh` now exist — add both.
+# Not here, deliberately: no eslint/knip/jscpd (no JavaScript).
+#
+# A check that is skipped for one package is not recorded here. It goes in
+# docs/skipped-checks.md, which names the change that removes it. A gap that nobody
+# writes down becomes permanent.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -122,7 +124,7 @@ check "staticcheck" staticcheck ./...
 # loop are the next change, and until they land deadcode reports the whole package,
 # because it roots its analysis at main. Every function in the package is exercised by
 # its tests. Remove this filter in the change that wires the package in, and do not
-# widen it to another package.
+# widen it to another package. See docs/skipped-checks.md.
 WIRED=()
 while IFS= read -r pkg; do
 	case "$pkg" in
