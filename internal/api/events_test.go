@@ -73,7 +73,7 @@ func newIngestFixture(t *testing.T) ingestFixture {
 		}
 		pub := priv.Public().(ed25519.PublicKey)
 		keys[rec.Slug] = pub
-		token, err := tenant.MintToken(tenant.Spec{Slug: rec.Slug}.Normalized(), priv, time.Now())
+		token, err := tenant.MintReportToken(tenant.Spec{Slug: rec.Slug}.Normalized(), priv, time.Now())
 		if err != nil {
 			t.Fatalf("mint: %v", err)
 		}
