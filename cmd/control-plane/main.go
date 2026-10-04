@@ -155,6 +155,22 @@ func pruneEvents(ctx context.Context, log *eventlog.Log, logger *slog.Logger) {
 	}
 }
 
+// newAPI builds the control plane's HTTP handler from what it needs.
+//
+// A function rather than a literal inside run, because the config has grown to the point
+// where it is most of what run does.
+func newAPI(o opts, st *store.SQLite, events *eventlog.Log, prov *provisioner.Reconciler,
+	verifier *auth.Verifier, log *slog.Logger) *api.Server {
+	return api.New(st, api.Config{
+		Verifier:       verifier,
+		HostnameSuffix: o.hostSuffix,
+		Events:         events,
+		// The provisioner already reads and writes the token-key Secrets, and it is the
+		// only thing that knows their names and their namespace.
+		TokenKeys: prov,
+	}, log)
+}
+
 // checkStartup refuses a configuration that would fail later and confusingly.
 func checkStartup(o opts, log *slog.Logger) error {
 	// A TTL below the minimum lets the mounted token expire before the kubelet replaces
@@ -211,16 +227,10 @@ func run(o opts, log *slog.Logger) error {
 		TokenTTL:              o.tokenTTL,
 		AssertionPublicKeyPEM: pubPEM,
 		BrokerTLS:             o.brokerTLS,
+		Events:                events,
 	}, o.interval, log)
 
-	srv := api.New(st, api.Config{
-		Verifier:       verifier,
-		HostnameSuffix: o.hostSuffix,
-		Events:         events,
-		// The provisioner already reads and writes the token-key Secrets, and it is
-		// the only thing that knows their names and their namespace.
-		TokenKeys: prov,
-	}, log)
+	srv := newAPI(o, st, events, prov, verifier, log)
 
 	ctx, stop := startBackground(log, events)
 	defer stop()

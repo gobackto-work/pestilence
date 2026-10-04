@@ -386,3 +386,59 @@ func TestDriftSuccessClearsAPreviousError(t *testing.T) {
 		t.Errorf("lastError = %q, want cleared after a successful sweep", got)
 	}
 }
+
+// forgettingEvents records what it was asked to forget, or refuses to forget.
+type forgettingEvents struct {
+	forgotten []string
+	err       error
+}
+
+func (f *forgettingEvents) DeleteWorkspace(_ context.Context, workspaceID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.forgotten = append(f.forgotten, workspaceID)
+	return nil
+}
+
+// A deleted workspace must not leave its run events behind. They are tenant data, and the
+// reconcile loop never comes back for a workspace once it is DELETED.
+func TestDeletingAWorkspaceForgetsItsEvents(t *testing.T) {
+	ctx := context.Background()
+	events := &forgettingEvents{}
+	c, s := newController(t, &fakeProvisioner{})
+	c.cfg.Events = events
+
+	insert(t, s, "id-1", "charlie-wombat-cccc", workspace.StateDeleting)
+	if err := c.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if len(events.forgotten) != 1 || events.forgotten[0] != "id-1" {
+		t.Errorf("forgot %v, want [id-1]", events.forgotten)
+	}
+	if got := stateOf(t, s, "id-1"); got.State != workspace.StateDeleted {
+		t.Errorf("state = %s, want DELETED", got.State)
+	}
+}
+
+// The events go before the workspace is recorded as deleted, so that a failure leaves it in
+// DELETING and retries. The other order takes it out of the loop with the events still there,
+// and nothing ever comes back for them.
+func TestAFailedForgetLeavesTheWorkspaceDeleting(t *testing.T) {
+	ctx := context.Background()
+	events := &forgettingEvents{err: errors.New("the record is unreachable")}
+	c, s := newController(t, &fakeProvisioner{})
+	c.cfg.Events = events
+
+	insert(t, s, "id-1", "charlie-wombat-cccc", workspace.StateDeleting)
+	if err := c.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	got := stateOf(t, s, "id-1")
+	if got.State != workspace.StateDeleting {
+		t.Errorf("state = %s, want DELETING so it retries", got.State)
+	}
+	if got.LastError == "" {
+		t.Error("lastError is empty; a stuck deletion would be invisible")
+	}
+}
