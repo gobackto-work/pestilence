@@ -213,9 +213,10 @@ func (r *Reconciler) ensureSigningMaterial(ctx context.Context, spec tenant.Spec
 // by construction rather than by intention.
 func (r *Reconciler) persistDerivedMaterial(ctx context.Context, spec tenant.Spec, ri dynamic.ResourceInterface, m tenant.SigningMaterial) error {
 	patch, err := json.Marshal(map[string]any{"data": map[string]string{
-		tenant.TokenDataKey: base64.StdEncoding.EncodeToString([]byte(m.Token)),
-		tenant.TLSKeyCert:   base64.StdEncoding.EncodeToString([]byte(m.TLSCertPEM)),
-		tenant.TLSKeyKey:    base64.StdEncoding.EncodeToString([]byte(m.TLSKeyPEM)),
+		tenant.TokenDataKey:   base64.StdEncoding.EncodeToString([]byte(m.Token)),
+		tenant.TokenReportKey: base64.StdEncoding.EncodeToString([]byte(m.ReportToken)),
+		tenant.TLSKeyCert:     base64.StdEncoding.EncodeToString([]byte(m.TLSCertPEM)),
+		tenant.TLSKeyKey:      base64.StdEncoding.EncodeToString([]byte(m.TLSKeyPEM)),
 	}})
 	if err != nil {
 		return fmt.Errorf("encode material patch: %w", err)
@@ -276,6 +277,17 @@ func materialFromSecret(u *unstructured.Unstructured, spec tenant.Spec, now time
 		changed = true
 	}
 
+	// The broker's reporting token rotates on the same schedule and for the same reason as
+	// the capability token. The broker reads it per call, so a rotation is picked up
+	// without a restart.
+	reportToken := string(secret.Data[tenant.TokenReportKey])
+	if tenant.TokenNeedsRotation(reportToken, now, spec.TokenTTL) {
+		if reportToken, err = tenant.MintReportToken(spec, priv, now); err != nil {
+			return tenant.SigningMaterial{}, false, err
+		}
+		changed = true
+	}
+
 	// The broker certificate is minted ONCE and never rotated -- see NewBrokerTLS for
 	// why. Absent means a workspace provisioned before TLS existed, and minting here is
 	// what upgrades it rather than leaving it on plaintext forever.
@@ -294,6 +306,7 @@ func materialFromSecret(u *unstructured.Unstructured, spec tenant.Spec, now time
 		PrivateKeyPEM: privPEM,
 		PublicKeyPEM:  pubPEM,
 		Token:         token,
+		ReportToken:   reportToken,
 		TLSCertPEM:    certPEM,
 		TLSKeyPEM:     keyPEM,
 	}, changed, nil

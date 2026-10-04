@@ -17,13 +17,25 @@ import (
 // broker pins EdDSA via WithValidMethods, which is what closes the HS256/"none"
 // confusion attacks.
 const (
-	TokenIssuer   = "pestilence"
+	TokenIssuer = "pestilence"
+
+	// TokenRoleRoot is the root agent. Only this role may orchestrate, so the broker
+	// accepts it and nothing else.
 	TokenRoleRoot = "root-agent"
 
-	// Data keys used by the three objects that carry token material.
+	// TokenRoleBroker is the broker, which reports run state and does nothing else.
+	//
+	// It is a separate role and a separate token, because the broker is a separate
+	// principal: it runs in the platform namespace holding a Role into the tenant
+	// namespace, so it must not hold the credential of the agent it supervises. One
+	// shared token would make a compromise of either a compromise of both.
+	TokenRoleBroker = "broker"
+
+	// Data keys used by the objects that carry token material.
 	TokenPrivateKeyKey = "ed25519.pem"
 	TokenPublicKeyKey  = "ed25519.pub"
 	TokenDataKey       = "token"
+	TokenReportKey     = "report-token"
 
 	// DefaultTokenTTL bounds the capability token.
 	//
@@ -82,6 +94,7 @@ type SigningMaterial struct {
 	PrivateKeyPEM string
 	PublicKeyPEM  string
 	Token         string
+	ReportToken   string
 	TLSCertPEM    string
 	TLSKeyPEM     string
 }
@@ -114,6 +127,10 @@ func NewSigningMaterial(spec Spec, now time.Time) (SigningMaterial, error) {
 	if err != nil {
 		return SigningMaterial{}, err
 	}
+	reportToken, err := MintReportToken(spec, priv, now)
+	if err != nil {
+		return SigningMaterial{}, err
+	}
 	tlsMaterial, err := NewBrokerTLS(spec, now)
 	if err != nil {
 		return SigningMaterial{}, err
@@ -122,6 +139,7 @@ func NewSigningMaterial(spec Spec, now time.Time) (SigningMaterial, error) {
 		PrivateKeyPEM: privPEM,
 		PublicKeyPEM:  pubPEM,
 		Token:         token,
+		ReportToken:   reportToken,
 		TLSCertPEM:    tlsMaterial.CertPEM,
 		TLSKeyPEM:     tlsMaterial.KeyPEM,
 	}, nil
@@ -156,10 +174,47 @@ func MintToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error
 	claims := jwt.MapClaims{
 		"iss":       TokenIssuer,
 		"sub":       "pi-root@" + s.Namespace(),
-		"aud":       jwt.ClaimStrings{s.BrokerServiceName(), TokenAudienceIngest},
+		"aud":       s.BrokerServiceName(),
 		"workspace": s.Slug,
 		"namespace": s.Namespace(),
 		"role":      TokenRoleRoot,
+		"iat":       now.Unix(),
+		"nbf":       now.Unix(),
+		"exp":       now.Add(ttl).Unix(),
+		"jti":       jti,
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(priv)
+}
+
+// MintReportToken issues the token the broker reports run state with.
+//
+// It is narrower than the capability token in both directions, which is the point of it
+// being a second token rather than a second audience on the first. Its audience names this
+// control plane and nothing else, so the broker refuses it; and its role is the reporting
+// role, so this control plane refuses it for anything but a report.
+func MintReportToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error) {
+	s := spec.Normalized()
+	if err := ValidateSlug(s.Slug); err != nil {
+		return "", err
+	}
+	if len(priv) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("signing key is %d bytes, want %d", len(priv), ed25519.PrivateKeySize)
+	}
+	ttl := s.TokenTTL
+	if ttl <= 0 {
+		ttl = DefaultTokenTTL
+	}
+	jti, err := randomID(16)
+	if err != nil {
+		return "", err
+	}
+	claims := jwt.MapClaims{
+		"iss":       TokenIssuer,
+		"sub":       "pi-broker@" + s.Namespace(),
+		"aud":       TokenAudienceIngest,
+		"workspace": s.Slug,
+		"namespace": s.Namespace(),
+		"role":      TokenRoleBroker,
 		"iat":       now.Unix(),
 		"nbf":       now.Unix(),
 		"exp":       now.Add(ttl).Unix(),
@@ -230,7 +285,7 @@ type Claims struct {
 //
 // Every rejection returns the same shape of error. The caller collapses them into one
 // response, so a probing client learns nothing about which check failed.
-func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespace string, now time.Time) (Claims, error) {
+func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespace, role string, now time.Time) (Claims, error) {
 	var claims Claims
 	if len(pub) != ed25519.PublicKeySize {
 		return Claims{}, fmt.Errorf("verification key is %d bytes, want %d", len(pub), ed25519.PublicKeySize)
@@ -255,8 +310,8 @@ func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespa
 	if claims.Namespace != namespace {
 		return Claims{}, fmt.Errorf("token: namespace %q is not %q", claims.Namespace, namespace)
 	}
-	if claims.Role != TokenRoleRoot {
-		return Claims{}, fmt.Errorf("token: role %q may not report", claims.Role)
+	if claims.Role != role {
+		return Claims{}, fmt.Errorf("token: role %q is not %q", claims.Role, role)
 	}
 	return claims, nil
 }
