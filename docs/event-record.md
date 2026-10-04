@@ -216,7 +216,10 @@ timeout the broker retries with the same `event_id`.
 
 ### The endpoint
 
-    POST /api/workspaces/{id}/events
+    POST /api/events
+
+The route names no workspace. The token names it, and the workspace owns the key that
+proves the token, so the caller supplies nothing to spoof.
 
 The body names the run and the state:
 
@@ -229,8 +232,9 @@ The body names the run and the state:
 | `occurred_at` | yes | RFC 3339, when the runtime observed the transition. |
 | `attributes` | no | The closed payload. |
 
-The body cannot name the workspace or the owner. Both come from the record, so a runtime
-cannot report for another workspace or attribute its run to another user.
+The body cannot name the workspace or the owner. Both come from the record and from the
+token, so a broker cannot report for another workspace or attribute its run to another
+user.
 
 The answer is `202` with the assigned sequence:
 
@@ -266,15 +270,31 @@ cheap to discard. A duplicate event in the record is not.
 
 ### Authentication of the write
 
-The runtime presents the workspace capability token, which already exists. The token
-carries the broker's service name and `pestilence-ingest` as audiences, and this endpoint
-requires the second.
+The broker presents its reporting token. It is a second token and not the capability one,
+because the broker is a second principal: it runs in the platform namespace holding a Role
+into the tenant namespace, so it must not hold the credential of the agent it supervises.
 
-This is not a separation of principals. The token belongs to the root agent, and the root
-agent is the reporter: it is the only party that can tell a finished run from a run that
-is waiting for a person. A second token would be held by the same process and would
-separate nothing. What the audience buys is the rule that a token minted for one service
-is refused at another, which starts to matter as soon as a second service mints tokens.
+| Token | Holder | Audience | Role |
+|---|---|---|---|
+| capability | the root agent | `broker-<slug>` | `root-agent` |
+| report | the broker | `pestilence-ingest` | `broker` |
+
+Neither is accepted where the other belongs. The capability token does not name this
+endpoint at all, and this endpoint requires the reporting role, so an agent's token is
+refused here on two independent grounds.
+
+The endpoint resolves the workspace from the token. The claim is read **without a
+signature** to find the key, and the key is what proves the claim: verification then
+compares the claim against the workspace whose key was used. A token naming a workspace it
+was not minted for selects a key that cannot verify it, so the unverified read decides a
+lookup and never an authorisation.
+
+That is the rule the broker already holds — the workspace comes from the token and never
+from a request field — and this endpoint now holds it too.
+
+**An unknown workspace answers exactly as a bad token does.** A `404` would let an
+unauthenticated caller probe which workspaces exist by making a token up, and a slug is the
+workspace's public hostname.
 
 The control plane derives the workspace public key from the signing key it already holds
 in its own namespace. It never reads a tenant namespace for it, and it never holds

@@ -316,6 +316,35 @@ func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespa
 	return claims, nil
 }
 
+// TokenWorkspace returns the workspace claim of a token that has NOT been verified.
+//
+// It exists so the reporting endpoint can find the key it needs to verify a token WITH.
+// The token names its workspace, the workspace owns the key, and the key is what proves
+// the claim. That is the ordinary `kid` pattern.
+//
+// The value it returns is a LOOKUP KEY and never an authorisation. VerifyToken re-checks
+// the claim against the workspace whose key was used, so a token naming a workspace it was
+// not minted for selects a key that cannot verify its signature, and is refused. A shared
+// key would not help either, because the claim is compared as well.
+//
+// Do not use this for a decision. It reads bytes a caller chose.
+func TokenWorkspace(raw string) (string, error) {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, claims); err != nil {
+		return "", fmt.Errorf("token: %w", err)
+	}
+	slug, _ := claims["workspace"].(string)
+	if slug == "" {
+		return "", fmt.Errorf("token: no workspace claim")
+	}
+	// Validated before it reaches a lookup, so a caller cannot make the control plane
+	// query for a value that is not a workspace name at all.
+	if err := ValidateSlug(slug); err != nil {
+		return "", fmt.Errorf("token: %w", err)
+	}
+	return slug, nil
+}
+
 // TokenRotationDivisor sets how much of the TTL must remain for a token to count as
 // fresh. A token is re-minted once less than half its life is left, so rotation
 // happens with as much margin as the TTL allows for the control plane to be down.
