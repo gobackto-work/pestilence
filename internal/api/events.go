@@ -61,7 +61,7 @@ func (s *Server) requireReporter(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		if _, err := tenant.VerifyToken(raw, pub, tenant.TokenAudienceIngest,
-			ws.Slug, ws.Namespace, time.Now()); err != nil {
+			ws.Slug, ws.Namespace, tenant.TokenRoleBroker, time.Now()); err != nil {
 			// The reason is logged but never returned: telling a caller which half of
 			// a forged token to fix next is free help.
 			s.log.Warn("capability token rejected", "slug", ws.Slug, "err", err)

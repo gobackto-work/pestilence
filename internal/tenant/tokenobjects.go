@@ -60,6 +60,7 @@ func (s Spec) tokenKeySecret() *corev1.Secret {
 		Data: map[string][]byte{
 			TokenPrivateKeyKey: []byte(s.Material.PrivateKeyPEM),
 			TokenDataKey:       []byte(s.Material.Token),
+			TokenReportKey:     []byte(s.Material.ReportToken),
 			// The broker's certificate and key live here too, so that ONE object holds
 			// everything the workspace's authority derives from and teardown deletes it
 			// in one step. They are rendered into the platform namespace from here, so
@@ -96,6 +97,29 @@ func (s Spec) tokenPubkeyConfigMap() *corev1.ConfigMap {
 		ObjectMeta: s.platformMeta(s.TokenPubkeyConfigMapName()),
 		Data: map[string]string{
 			TokenPublicKeyKey: s.Material.PublicKeyPEM,
+		},
+	}
+}
+
+// reportTokenSecret carries the broker's reporting token, in the platform namespace
+// beside the broker.
+//
+// Class: platform, and it is a CREDENTIAL. It is rendered from the material stored in the
+// control plane's namespace, so the token has one authoritative home and this is a copy
+// that teardown removes along with the broker.
+//
+// It is NOT the capability token, and that is the point of it. The broker reports run
+// state and does nothing else: this token names the control plane as its only audience and
+// carries the reporting role, while the capability token names the broker and carries the
+// orchestration role. Neither is accepted where the other belongs. The two also have
+// different holders in different namespaces, so one compromise is not the other.
+func (s Spec) reportTokenSecret() *corev1.Secret {
+	return &corev1.Secret{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		ObjectMeta: s.platformMeta(s.ReportTokenSecretName()),
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			TokenDataKey: []byte(s.Material.ReportToken),
 		},
 	}
 }
