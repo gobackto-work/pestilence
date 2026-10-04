@@ -108,7 +108,7 @@ func (f ingestFixture) post(t *testing.T, workspaceID, token, body string) *http
 // reportBody builds a minimal valid report.
 func reportBody(eventID, runID, state string) string {
 	return `{"event_id":"` + eventID + `","run_id":"` + runID + `","state":"` + state +
-		`","occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
+		`","mode":"interactive","occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 }
 
 func TestAppendEventRecordsAReportedState(t *testing.T) {
@@ -193,7 +193,7 @@ func TestAppendEventRefusesAnUnreachableState(t *testing.T) {
 func TestAppendEventCannotChooseTheOwner(t *testing.T) {
 	f := newIngestFixture(t)
 	body := `{"event_id":"` + ulid.Make().String() + `","run_id":"` + ulid.Make().String() +
-		`","state":"running","owner_id":"someone-else",` +
+		`","state":"running","mode":"interactive","owner_id":"someone-else",` +
 		`"occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 
 	w := f.post(t, f.ws.ID, f.token, body)
@@ -205,7 +205,7 @@ func TestAppendEventCannotChooseTheOwner(t *testing.T) {
 func TestAppendEventRefusesAnUnknownAttribute(t *testing.T) {
 	f := newIngestFixture(t)
 	body := `{"event_id":"` + ulid.Make().String() + `","run_id":"` + ulid.Make().String() +
-		`","state":"running","attributes":{"prompt":"summarise my repository"},` +
+		`","state":"running","mode":"interactive","attributes":{"prompt":"summarise my repository"},` +
 		`"occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 
 	w := f.post(t, f.ws.ID, f.token, body)

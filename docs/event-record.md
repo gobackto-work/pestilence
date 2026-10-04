@@ -128,9 +128,9 @@ notification sink.
 | State | Terminal | Meaning |
 |---|---|---|
 | `running` | no | The agent is working. |
-| `waiting` | no | The agent needs input from a person. |
-| `succeeded` | yes | The agent reached its goal. |
-| `failed` | yes | The agent stopped on an error. |
+| `waiting` | no | An interactive run needs input from a person. |
+| `succeeded` | yes | The runtime ended the run without an error. |
+| `failed` | yes | The runtime ended the run on an error. |
 | `cancelled` | yes | A person stopped the run. |
 | `budget_exhausted` | yes | The run reached a token, time or spend limit. |
 
@@ -138,8 +138,62 @@ notification sink.
 than rare. A run that stops for a budget must be distinguishable from one that failed,
 because the person can act on the first and not the second.
 
+**`succeeded` is the runtime's verdict and not task success.** The signals that exist are
+process signals: a harness that exits zero has ended the run without an error, and that is
+all it means. A person who stops a run and a job well done look the same from outside. A
+notification that says the work is done is a claim the record cannot support, which is why
+a classifier refines it for the notification and never for the record.
+
+### Mode
+
+A run has a mode, and the mode decides which states it can reach.
+
+| Mode | Can wait | Run |
+|---|---|---|
+| `interactive` | yes | The root agent, with a person at the other end. |
+| `batch` | no | A worker, spawned as a job. |
+
+**A batch run never reaches `waiting`.** A run that waits for a person who is not there
+waits for ever, and a parent waiting on that run would wait with it. The record refuses
+the transition rather than storing a state nothing can leave.
+
+The first report of a run sets the mode, and every later report must agree. Without that
+rule a client could turn a batch run into an interactive one and reach `waiting` through
+the side door.
+
 The state values are the runtime's contract. This document records them and does not
 define them.
+
+## Who reports
+
+One component reports one run, and it is the component that outlives the agent process.
+An agent cannot report the state it reaches by dying.
+
+| Run | Reported by | What only it can see |
+|---|---|---|
+| the root agent | the bridge, through the broker | the turn boundary, and the child process ending |
+| a worker | the broker | the job reaching a terminal status |
+
+The broker is the only component that reports to this service. It is therefore the only
+one that needs a credential for it and the only one that needs this service's address. The
+bridge tells the broker about a turn boundary over the authenticated channel it already
+has, because the bridge is the only party that holds the session.
+
+**A run lasts as long as the process that runs it.** A root run lasts as long as the
+bridge. A worker run lasts as long as its job. That is what makes the terminal state
+observable from outside: the thing that ends is the thing whose end can be seen. A root
+run that restarts is a failed run and then a new run, and not a pause.
+
+**Do not take a worker's state from the agent.** The root agent learns that a worker has
+finished only when it looks, so the delay would be the model's, and a worker that is never
+looked at would never be reported at all. The agent is also the party most exposed to a
+prompt that lies. The broker derives a worker's state from the cluster, and it accepts a
+report about the root run only from the root agent, which is the authority on its own
+session.
+
+The control plane derives `previous_state` from the run it holds, so two reporters cannot
+corrupt the record. That property is what lets the bridge and the broker both write to one
+run without an extra protocol.
 
 ## The write path
 
@@ -171,6 +225,7 @@ The body names the run and the state:
 | `event_id` | yes | The idempotency key. A retry carries the same value. |
 | `run_id` | yes | The run. Its format belongs to the runtime. |
 | `state` | yes | The state the run entered. |
+| `mode` | yes | `interactive` or `batch`. The first report sets it. |
 | `occurred_at` | yes | RFC 3339, when the runtime observed the transition. |
 | `attributes` | no | The closed payload. |
 
