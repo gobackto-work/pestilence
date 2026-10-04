@@ -22,31 +22,37 @@ func workspaceFrom(ctx context.Context) workspace.Workspace {
 	return ws
 }
 
-// requireReporter authenticates a workspace capability token and hands the workspace to
+// requireReporter authenticates a workspace's reporting token and hands the workspace to
 // the handler.
 //
 // This is not requireOwner. town's assertion says which user is asking; this says which
-// workspace's runtime is reporting. The route names the workspace, the token is checked
-// against that workspace's own key, and the token's workspace claim must match, so a
-// token minted for one workspace cannot report for another.
-//
-// The token belongs to the root agent. The agent is the party that can tell a run that
-// has finished from a run that is waiting for a person, and the broker only forwards
-// what the agent says.
+// workspace's broker is reporting. The route names no workspace: the token does, and the
+// workspace owns the key that proves the token.
 func (s *Server) requireReporter(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ws, err := s.store.Get(r.Context(), r.PathValue("id"))
-		if err != nil {
-			// A read failure and a missing row answer the same way. Distinguishing
-			// them would let an unauthenticated caller map which workspace ids exist.
-			writeError(w, http.StatusNotFound, "not_found", "no such workspace")
-			return
-		}
-
 		raw, ok := bearerToken(r)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token")
+			return
+		}
+
+		// The claim selects the KEY, and the key is what makes the claim true. The value
+		// here is a lookup key and never an authorisation: it is read from bytes the
+		// caller chose, and everything it says is checked again after the signature
+		// verifies.
+		slug, err := tenant.TokenWorkspace(raw)
+		if err != nil {
+			s.rejectReporter(w, slug, err)
+			return
+		}
+
+		ws, err := s.store.GetBySlug(r.Context(), slug)
+		if err != nil {
+			// An unknown workspace answers exactly as a bad token does. A 404 would let an
+			// unauthenticated caller probe which workspaces exist by making up a token,
+			// and a slug is the workspace's public hostname.
+			s.rejectReporter(w, slug, err)
 			return
 		}
 
@@ -60,18 +66,27 @@ func (s *Server) requireReporter(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		// The claim is compared against the workspace whose key was used, so a token
+		// naming a workspace it was not minted for cannot pass, even if two workspaces
+		// ever shared a key.
 		if _, err := tenant.VerifyToken(raw, pub, tenant.TokenAudienceIngest,
 			ws.Slug, ws.Namespace, tenant.TokenRoleBroker, time.Now()); err != nil {
-			// The reason is logged but never returned: telling a caller which half of
-			// a forged token to fix next is free help.
-			s.log.Warn("capability token rejected", "slug", ws.Slug, "err", err)
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(w, http.StatusUnauthorized, "unauthorized", "capability token is not valid")
+			s.rejectReporter(w, ws.Slug, err)
 			return
 		}
 
 		next(w, r.WithContext(context.WithValue(r.Context(), workspaceKey{}, ws)))
 	}
+}
+
+// rejectReporter answers one way for every reason a reporting token is not accepted, so a
+// caller that is guessing learns nothing from the difference.
+func (s *Server) rejectReporter(w http.ResponseWriter, slug string, err error) {
+	// The reason is logged but never returned: telling a caller which half of a forged
+	// token to fix next is free help.
+	s.log.Warn("reporting token rejected", "slug", slug, "err", err)
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeError(w, http.StatusUnauthorized, "unauthorized", "the token is not valid")
 }
 
 // appendEventRequest is the body of a report.
