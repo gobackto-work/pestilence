@@ -111,6 +111,50 @@ func openStores(o opts) (*store.SQLite, *eventlog.Log, func(), error) {
 	return st, events, func() { _ = events.Close(); _ = st.Close() }, nil
 }
 
+// startBackground stops the process on a signal, and starts the record's pruning.
+func startBackground(log *slog.Logger, events *eventlog.Log) (context.Context, func()) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go pruneEvents(ctx, events, log)
+	return ctx, stop
+}
+
+// pruneInterval is how often the record discards what it no longer needs.
+//
+// An hour, because the limits are seven days and 1700 events: a record that is being kept
+// below those does not need pruning more often, and one that is not needs an operator rather
+// than a faster timer.
+const pruneInterval = time.Hour
+
+// pruneEvents discards events past the retention limit, on a timer.
+//
+// It reports what it could NOT discard, because a record that stays above its size limit means
+// a subscription is not consuming. That is a fault, and pruning must never resolve it by
+// discarding an event nobody has seen.
+func pruneEvents(ctx context.Context, log *eventlog.Log, logger *slog.Logger) {
+	ticker := time.NewTicker(pruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			result, err := log.Prune(ctx, time.Now().UTC())
+			if err != nil {
+				logger.Warn("could not prune the event record", "err", err)
+				continue
+			}
+			if result.ByAge > 0 || result.ByCount > 0 {
+				logger.Info("pruned the event record",
+					"byAge", result.ByAge, "byCount", result.ByCount, "held", result.Held)
+			}
+			if result.Held > 0 {
+				logger.Warn("the event record is holding events a subscription has not taken",
+					"held", result.Held)
+			}
+		}
+	}
+}
+
 // checkStartup refuses a configuration that would fail later and confusingly.
 func checkStartup(o opts, log *slog.Logger) error {
 	// A TTL below the minimum lets the mounted token expire before the kubelet replaces
@@ -178,7 +222,7 @@ func run(o opts, log *slog.Logger) error {
 		TokenKeys: prov,
 	}, log)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := startBackground(log, events)
 	defer stop()
 
 	errCh := make(chan error, 2)

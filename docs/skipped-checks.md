@@ -10,22 +10,16 @@ Read this file before you review a change.
 
 ## Open skips
 
-### `deadcode` over `internal/eventlog`
+None. The gate checks everything it says it checks.
 
-| | |
-|---|---|
-| Check | `deadcode (unreachable functions)` |
-| Skipped for | `internal/eventlog` |
-| Why | `deadcode` roots its analysis at `main`. Nothing calls this package from `main` yet, so it reports every function in it. The ingest endpoint and the delivery loop are the next change, and every function is exercised by the package's tests meanwhile. |
-| Removed by | wiring the package into `cmd/control-plane`, in the same change that adds the ingest endpoint and the delivery loop |
-| Risk while open | a function reachable only from a test, inside this package, is not reported as dead code |
+`internal/eventlog` was skipped here between the change that added it and the change
+that wired the last of it in. The entry is gone with the wiring.
 
-**At review time, run the check over the whole module.** This reports nothing when the
-package is healthy, and it does not skip anything:
-
-```sh
-go list ./... | xargs deadcode
-```
+**Worth knowing about the check.** `deadcode` reports a method as reachable when its
+type satisfies an interface that something reachable uses, and it cannot tell which of
+those methods is actually called. So a type held behind an interface goes quiet in this
+check even if most of its methods have no caller. It is a real limit, and it is why the
+planted-function check above is worth running by hand.
 
 ## What a new skip needs
 
