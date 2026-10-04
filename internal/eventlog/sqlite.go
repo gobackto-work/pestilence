@@ -357,13 +357,18 @@ func (l *Log) Run(ctx context.Context, id string) (Run, error) {
 
 // EnsurePull returns the pull subscription for one principal, creating it if it is absent.
 //
+// A principal is town's identifier and not ours, so it is bounded and not format-checked. That
+// is the same lesson as the owner id on an event: a format belonging to another component
+// cannot be pinned here, because the component will change it and this will refuse the new
+// shape.
+//
 // This is the only way to create one, and it takes no id and no kind. A pull subscription is
 // identified by its principal, so a caller cannot make a second one for the same owner and
 // cannot name an owner that is not its own. The API layer is what checks that the principal
 // is the one the request is authenticated as; this package cannot authenticate anything.
 func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription, error) {
-	if err := checkID(principalID); err != nil {
-		return Subscription{}, err
+	if !opaqueID.MatchString(principalID) {
+		return Subscription{}, fmt.Errorf("%w: principal id %q", ErrInvalid, principalID)
 	}
 	// The unique constraint on (principal_id, kind) makes a concurrent create a no-op rather
 	// than a second cursor.
@@ -392,8 +397,8 @@ func (l *Log) CreateSubscription(ctx context.Context, s Subscription) error {
 	if err := checkID(s.ID); err != nil {
 		return err
 	}
-	if err := checkID(s.PrincipalID); err != nil {
-		return err
+	if !opaqueID.MatchString(s.PrincipalID) {
+		return fmt.Errorf("%w: principal id %q", ErrInvalid, s.PrincipalID)
 	}
 	if s.State == "" {
 		s.State = SubscriptionActive

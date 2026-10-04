@@ -120,19 +120,7 @@ step "go: format, vet, lint, dead code"
 check_quiet "gofmt" gofmt -l .
 check "go vet" go vet ./...
 check "staticcheck" staticcheck ./...
-# internal/eventlog is not reachable from main yet. The ingest endpoint and the delivery
-# loop are the next change, and until they land deadcode reports the whole package,
-# because it roots its analysis at main. Every function in the package is exercised by
-# its tests. Remove this filter in the change that wires the package in, and do not
-# widen it to another package. See docs/skipped-checks.md.
-WIRED=()
-while IFS= read -r pkg; do
-	case "$pkg" in
-	*/internal/eventlog) continue ;;
-	esac
-	WIRED+=("$pkg")
-done < <(go list ./...)
-check_quiet "deadcode (unreachable functions)" deadcode "${WIRED[@]}"
+check_quiet "deadcode (unreachable functions)" deadcode ./...
 check "golangci-lint (complexity, duplication, security)" golangci-lint run ./...
 
 step "go: tests and vulnerabilities"

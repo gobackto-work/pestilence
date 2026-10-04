@@ -53,21 +53,28 @@ type Config struct {
 	// HostnameSuffix is appended to the slug, e.g. "gobackto.work".
 	HostnameSuffix string
 
-	// Events records a state transition that a workspace's runtime reports. Required
-	// for the ingest endpoint.
-	Events EventAppender
+	// Events records a state transition that a workspace's runtime reports, and serves the
+	// events an owner has not taken. Required for the ingest and read endpoints.
+	Events EventRecord
 
 	// TokenKeys resolves the public key that signs one workspace's capability token,
 	// by slug. Required for the ingest endpoint.
 	TokenKeys TokenKeySource
 }
 
-// EventAppender records one reported state transition. eventlog.Log satisfies it.
+// EventRecord is the durable record of run events. eventlog.Log satisfies it.
 //
-// It is an interface and not the concrete type so that this package does not depend on
-// where the record is stored, and so that a test can refuse a write deliberately.
-type EventAppender interface {
+// An interface and not the concrete type so that this package does not depend on where the
+// record is stored, and so that a test can refuse a write deliberately.
+type EventRecord interface {
 	Append(ctx context.Context, r eventlog.Report) (eventlog.AppendResult, error)
+	// EnsurePull opens the read subscription for a principal, creating it once.
+	EnsurePull(ctx context.Context, principalID string) (eventlog.Subscription, error)
+	// Outstanding returns the events a subscription has not taken, and the subscription's
+	// cursor.
+	Outstanding(ctx context.Context, subscriptionID string, limit int) (eventlog.Subscription, []eventlog.Event, error)
+	// AdvanceCursor records what a subscriber has taken.
+	AdvanceCursor(ctx context.Context, id string, to int64) error
 }
 
 // TokenKeySource resolves the public key that signs one workspace's capability token.
@@ -127,6 +134,12 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	// true. The caller therefore has nothing to spoof: it cannot report as a workspace
 	// other than the one its token was minted for.
 	srv.mux.HandleFunc("POST /api/events", srv.requireReporter(srv.handleAppendEvent))
+
+	// The read side. These are owner-scoped like every other route a user calls: the owner
+	// comes from the assertion, and a subscription takes the events of one principal and no
+	// others, so there is nothing here that can read another user's runs.
+	srv.mux.HandleFunc("GET /api/events", srv.requireOwner(srv.handleEvents))
+	srv.mux.HandleFunc("POST /api/events/ack", srv.requireOwner(srv.handleAckEvents))
 
 	return srv
 }
