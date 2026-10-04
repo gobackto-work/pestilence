@@ -35,6 +35,14 @@ type Provisioner interface {
 	WaitForDeletion(ctx context.Context, spec tenant.Spec, timeout time.Duration) error
 }
 
+// EventForgetter forgets a workspace's run events. *eventlog.Log satisfies it.
+//
+// An interface so that the controller does not depend on where the record is stored, and so
+// that a test can make the delete fail.
+type EventForgetter interface {
+	DeleteWorkspace(ctx context.Context, workspaceID string) error
+}
+
 // Config is what the controller needs to rebuild a provisioning spec from a
 // stored record. Images are platform configuration, not tenant input, so they
 // live here rather than in the database.
@@ -51,6 +59,13 @@ type Config struct {
 	// DriftInterval is how often steady workspaces are re-applied. Drift correction
 	// is eventual, not immediate, so this is much slower than the intent loop.
 	DriftInterval time.Duration
+
+	// Events forgets a workspace's run events once its namespace is gone.
+	//
+	// Optional, because a test does not need one. A nil value forgets nothing, which is what
+	// the behaviour was before this existed: the events outlived the workspace that owned
+	// them, and that is tenant data.
+	Events EventForgetter
 
 	// TokenTTL bounds a workspace's capability token, and therefore also sets the
 	// rotation cadence: a token is re-minted once less than half its life remains,
@@ -288,6 +303,17 @@ func (c *Controller) destroy(ctx context.Context, w workspace.Workspace) error {
 	// claiming success while the residue sat there with nothing to retry it.
 	if err := c.prov.WaitForDeletion(ctx, spec, c.deletionTimeout); err != nil {
 		return c.retryDeletion(ctx, w, fmt.Errorf("waiting for deletion: %w", err))
+	}
+	// The workspace's events go BEFORE it is recorded as deleted.
+	//
+	// The other order records a workspace as gone with its events still there, and takes it
+	// out of the reconcile loop, so nothing ever comes back for them. This order leaves it in
+	// DELETING and retries, which is the discipline WaitForDeletion applies just above. The
+	// delete is idempotent, so a retry after a partial failure is harmless.
+	if c.cfg.Events != nil {
+		if err := c.cfg.Events.DeleteWorkspace(ctx, w.ID); err != nil {
+			return c.retryDeletion(ctx, w, fmt.Errorf("forgetting the workspace's events: %w", err))
+		}
 	}
 	if err := c.store.UpdateState(ctx, w.ID, workspace.StateDeleting, workspace.StateDeleted); err != nil {
 		if errors.Is(err, store.ErrConflict) {
