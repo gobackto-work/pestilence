@@ -196,7 +196,7 @@ func TestAnExternalSubscriptionNeverSeesAnotherPrincipal(t *testing.T) {
 	appendFor(mine)
 	appendFor(theirs)
 
-	sub := Subscription{ID: newID(), Kind: KindExternal, PrincipalID: mine,
+	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: mine,
 		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
 	if err := l.CreateSubscription(ctx, sub); err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -214,53 +214,58 @@ func TestAnExternalSubscriptionNeverSeesAnotherPrincipal(t *testing.T) {
 	}
 }
 
-func TestTheInternalSubscriptionTakesEveryEvent(t *testing.T) {
+func TestAPullSubscriptionTakesOnlyItsPrincipalsEvents(t *testing.T) {
 	l := open(t)
 	ctx := context.Background()
 
-	workspace := newID()
-	for range 2 {
+	workspace, mine := newID(), newID()
+	for _, owner := range []string{mine, newID()} {
 		report := Report{ID: newID(), RunID: newID(), WorkspaceID: workspace,
-			OwnerID: newID(), State: StateRunning, Mode: ModeInteractive, OccurredAt: time.Now().UTC()}
+			OwnerID: owner, State: StateRunning, Mode: ModeInteractive, OccurredAt: time.Now().UTC()}
 		if _, err := l.Append(ctx, report); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
 
-	sub, err := l.EnsureInternal(ctx, newID())
+	sub, err := l.EnsurePull(ctx, mine)
 	if err != nil {
-		t.Fatalf("ensure internal: %v", err)
+		t.Fatalf("ensure pull: %v", err)
 	}
-	if sub.Kind != KindInternal {
-		t.Errorf("kind = %s, want internal", sub.Kind)
+	if sub.Kind != KindPull {
+		t.Errorf("kind = %s, want %s", sub.Kind, KindPull)
 	}
+
+	// A second call returns the same subscription. The unique constraint on the principal
+	// and the kind is what makes that true.
+	again, err := l.EnsurePull(ctx, mine)
+	if err != nil {
+		t.Fatalf("ensure pull twice: %v", err)
+	}
+	if again.ID != sub.ID {
+		t.Errorf("the second call created a second subscription: %s then %s", sub.ID, again.ID)
+	}
+
 	_, events, err := l.Outstanding(ctx, sub.ID, 10)
 	if err != nil {
 		t.Fatalf("outstanding: %v", err)
 	}
-	if len(events) != 2 {
-		t.Errorf("the internal subscription has %d events, want 2", len(events))
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1, so a subscription saw another principal's run", len(events))
 	}
-
-	// A second call returns the same subscription and does not create another.
-	again, err := l.EnsureInternal(ctx, sub.ID)
-	if err != nil {
-		t.Fatalf("ensure internal twice: %v", err)
-	}
-	if again.Cursor != sub.Cursor {
-		t.Errorf("the second call changed the cursor from %d to %d", sub.Cursor, again.Cursor)
+	if events[0].OwnerID != mine {
+		t.Errorf("the subscription received owner %s, want %s", events[0].OwnerID, mine)
 	}
 }
 
-// An internal subscription receives every tenant's events, so a path that lets a
-// caller ask for one is an authorisation failure and not a validation failure.
-func TestCreateSubscriptionRefusesAnInternalKind(t *testing.T) {
+// A pull subscription belongs to a principal, so nothing may ask for one through the path
+// that creates push ones: it would be a subscription for someone else's events.
+func TestCreateSubscriptionRefusesAPullKind(t *testing.T) {
 	l := open(t)
 	err := l.CreateSubscription(context.Background(), Subscription{
-		ID: newID(), Kind: KindInternal, PrincipalID: newID(),
+		ID: newID(), Kind: KindPull, PrincipalID: newID(),
 	})
-	if !errors.Is(err, ErrInternalSubscription) {
-		t.Fatalf("CreateSubscription(internal) = %v, want ErrInternalSubscription", err)
+	if !errors.Is(err, ErrPullSubscription) {
+		t.Fatalf("CreateSubscription(pull) = %v, want ErrPullSubscription", err)
 	}
 }
 
@@ -362,7 +367,7 @@ func TestPruneNeverDiscardsWhatASubscriptionHasNotTaken(t *testing.T) {
 	ctx := context.Background()
 	f.append(t, StateRunning, StateWaiting, StateRunning)
 
-	sub := Subscription{ID: newID(), Kind: KindExternal, PrincipalID: f.ownerID,
+	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: f.ownerID,
 		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
 	if err := f.log.CreateSubscription(ctx, sub); err != nil {
 		t.Fatalf("create subscription: %v", err)
@@ -406,7 +411,7 @@ func TestAFailedSubscriptionStopsHoldingTheRecord(t *testing.T) {
 	ctx := context.Background()
 	f.append(t, StateRunning, StateWaiting)
 
-	sub := Subscription{ID: newID(), Kind: KindExternal, PrincipalID: f.ownerID,
+	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: f.ownerID,
 		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
 	if err := f.log.CreateSubscription(ctx, sub); err != nil {
 		t.Fatalf("create subscription: %v", err)

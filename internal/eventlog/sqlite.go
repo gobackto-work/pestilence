@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	// Pure-Go SQLite, as the workspace registry uses. mattn/go-sqlite3 needs cgo and
 	// the build environment sets CGO_ENABLED=0 with no C compiler.
 	_ "modernc.org/sqlite"
@@ -70,8 +72,9 @@ var schema = []string{
 
 	`CREATE INDEX IF NOT EXISTS runs_workspace_idx ON runs(workspace_id)`,
 
-	// url and secret are present for an external subscription only. The internal
-	// subscription has neither, which the check constraint records.
+	// url and secret are present for a push subscription only, which the check constraint
+	// records. One subscription per principal per kind: a second pull subscription for the
+	// same owner would be a second cursor, and the two would drift.
 	`CREATE TABLE IF NOT EXISTS subscriptions (
         id           TEXT PRIMARY KEY,
         kind         TEXT NOT NULL,
@@ -81,8 +84,9 @@ var schema = []string{
         cursor       INTEGER NOT NULL DEFAULT 0,
         state        TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
-        CHECK (kind IN ('internal', 'external')),
-        CHECK (kind = 'internal' OR (url <> '' AND secret <> ''))
+        CHECK (kind IN ('pull', 'push')),
+        CHECK (kind = 'pull' OR (url <> '' AND secret <> '')),
+        UNIQUE (principal_id, kind)
     )`,
 
 	// A delivery row records an attempt, and it is not created when an event is
@@ -295,10 +299,9 @@ func (l *Log) EventsAfter(ctx context.Context, after int64, limit int) ([]Event,
 
 // Outstanding returns the events that a subscription has not taken, oldest first.
 //
-// An internal subscription takes every event, because town delivers for every user.
-// An external subscription takes only the events of its own principal, so a principal
-// can never be sent another principal's run. This is the authorisation that the
-// delivery layer depends on, and it lives here because only the record can apply it.
+// Every subscription takes the events of ONE principal and no others, so a principal can
+// never be sent another principal's run. This is the authorisation the read endpoint and the
+// delivery layer both depend on, and it lives here because only the record can apply it.
 func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int) (Subscription, []Event, error) {
 	s, err := l.Subscription(ctx, subscriptionID)
 	if err != nil {
@@ -308,16 +311,9 @@ func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int)
 		return s, nil, nil
 	}
 
-	query := selectEvents + ` WHERE sequence > ?`
-	args := []any{s.Cursor}
-	if s.Kind == KindExternal {
-		query += ` AND owner_id = ?`
-		args = append(args, s.PrincipalID)
-	}
-	query += ` ORDER BY sequence LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := l.db.QueryContext(ctx, query, args...)
+	rows, err := l.db.QueryContext(ctx, selectEvents+`
+        WHERE sequence > ? AND owner_id = ? ORDER BY sequence LIMIT ?`,
+		s.Cursor, s.PrincipalID, limit)
 	if err != nil {
 		return Subscription{}, nil, fmt.Errorf("read outstanding for %s: %w", subscriptionID, err)
 	}
@@ -359,32 +355,39 @@ func (l *Log) Run(ctx context.Context, id string) (Run, error) {
 	return r, nil
 }
 
-// EnsureInternal returns the internal subscription, creating it if it is absent.
+// EnsurePull returns the pull subscription for one principal, creating it if it is absent.
 //
-// This is the only way to create one, and it takes no kind. A request path therefore
-// cannot ask for an internal subscription, which would deliver every tenant's events
-// to whoever asked. That is an authorisation boundary and not a validation one.
-func (l *Log) EnsureInternal(ctx context.Context, id string) (Subscription, error) {
-	if err := checkID(id); err != nil {
+// This is the only way to create one, and it takes no id and no kind. A pull subscription is
+// identified by its principal, so a caller cannot make a second one for the same owner and
+// cannot name an owner that is not its own. The API layer is what checks that the principal
+// is the one the request is authenticated as; this package cannot authenticate anything.
+func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription, error) {
+	if err := checkID(principalID); err != nil {
 		return Subscription{}, err
 	}
+	// The unique constraint on (principal_id, kind) makes a concurrent create a no-op rather
+	// than a second cursor.
 	if _, err := l.db.ExecContext(ctx, `
         INSERT INTO subscriptions (id, kind, principal_id, cursor, state, created_at)
-        VALUES (?, 'internal', '', 0, ?, ?)
-        ON CONFLICT(id) DO NOTHING`,
-		id, string(SubscriptionActive), millis(time.Now().UTC())); err != nil {
-		return Subscription{}, fmt.Errorf("ensure internal subscription: %w", err)
+        VALUES (?, ?, ?, 0, ?, ?)
+        ON CONFLICT DO NOTHING`,
+		ulid.Make().String(), string(KindPull), principalID,
+		string(SubscriptionActive), millis(time.Now().UTC())); err != nil {
+		return Subscription{}, fmt.Errorf("create the pull subscription for %s: %w", principalID, err)
 	}
-	return l.Subscription(ctx, id)
+
+	row := l.db.QueryRowContext(ctx, selectSubscriptions+`
+        WHERE principal_id = ? AND kind = ?`, principalID, string(KindPull))
+	return scanSubscription(row)
 }
 
-// CreateSubscription creates an external subscription.
+// CreateSubscription creates a push subscription.
 func (l *Log) CreateSubscription(ctx context.Context, s Subscription) error {
-	if s.Kind != KindExternal {
-		return fmt.Errorf("%w: use EnsureInternal", ErrInternalSubscription)
+	if s.Kind != KindPush {
+		return fmt.Errorf("%w: use EnsurePull", ErrPullSubscription)
 	}
 	if s.URL == "" || s.Secret == "" || s.PrincipalID == "" {
-		return fmt.Errorf("%w: an external subscription needs a principal, a url and a secret", ErrInvalid)
+		return fmt.Errorf("%w: a push subscription needs a principal, a url and a secret", ErrInvalid)
 	}
 	if err := checkID(s.ID); err != nil {
 		return err
@@ -407,25 +410,7 @@ func (l *Log) CreateSubscription(ctx context.Context, s Subscription) error {
 
 // Subscription returns one subscription.
 func (l *Log) Subscription(ctx context.Context, id string) (Subscription, error) {
-	var (
-		s         Subscription
-		kind      string
-		state     string
-		createdAt int64
-	)
-	err := l.db.QueryRowContext(ctx, `
-        SELECT id, kind, principal_id, url, secret, cursor, state, created_at
-        FROM subscriptions WHERE id = ?`, id).
-		Scan(&s.ID, &kind, &s.PrincipalID, &s.URL, &s.Secret, &s.Cursor, &state, &createdAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Subscription{}, ErrNotFound
-	}
-	if err != nil {
-		return Subscription{}, fmt.Errorf("get subscription %s: %w", id, err)
-	}
-	s.Kind, s.State = SubscriptionKind(kind), SubscriptionState(state)
-	s.CreatedAt = fromMillis(createdAt)
-	return s, nil
+	return scanSubscription(l.db.QueryRowContext(ctx, selectSubscriptions+` WHERE id = ?`, id))
 }
 
 // AdvanceCursor records what a subscription has taken.
@@ -565,6 +550,30 @@ func (l *Log) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 const selectEvents = `SELECT sequence, event_id, run_id, workspace_id, owner_id, kind,
                              previous_state, state, occurred_at, recorded_at, attributes
                       FROM events`
+
+const selectSubscriptions = `SELECT id, kind, principal_id, url, secret, cursor, state, created_at
+                             FROM subscriptions`
+
+// scanSubscription reads one subscription row. It maps sql.ErrNoRows to ErrNotFound, so a
+// caller does not have to import database/sql to tell the two apart.
+func scanSubscription(row *sql.Row) (Subscription, error) {
+	var (
+		s         Subscription
+		kind      string
+		state     string
+		createdAt int64
+	)
+	err := row.Scan(&s.ID, &kind, &s.PrincipalID, &s.URL, &s.Secret, &s.Cursor, &state, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Subscription{}, ErrNotFound
+	}
+	if err != nil {
+		return Subscription{}, fmt.Errorf("read subscription: %w", err)
+	}
+	s.Kind, s.State = SubscriptionKind(kind), SubscriptionState(state)
+	s.CreatedAt = fromMillis(createdAt)
+	return s, nil
+}
 
 func scanEvents(rows *sql.Rows) ([]Event, error) {
 	var out []Event

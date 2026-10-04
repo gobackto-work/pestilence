@@ -323,38 +323,36 @@ becomes a problem, the cursor moves to the run, at the cost of one cursor per ru
 
 ## Subscriptions
 
-One table holds every subscription. A `kind` column separates the two shapes.
+One table holds every subscription. A `kind` column separates the two ways one is served.
 
-| Column | Internal | External |
+| Column | `pull` | `push` |
 |---|---|---|
 | `id` | ULID | ULID |
-| `kind` | `internal` | `external` |
-| `principal_id` | the control plane | the subscribing user |
-| `filter` | none. Every event. | the principal's workspaces |
+| `principal_id` | the owner whose events it takes | the same |
 | `url` | absent | the callback URL |
 | `secret` | absent | the signing secret |
-| `cursor` | the last accepted sequence | the last acknowledged sequence |
+| `cursor` | the last acknowledged sequence | the same |
 | `state` | active | active, or failed |
 
-### Why town is not an ordinary subscriber
+**Every subscription takes the events of ONE principal and no others.** There is no
+subscription that sees more than one, which makes the authorisation a property of the query
+rather than a check that someone has to remember to write.
 
-The difference is not trust. It is the unit of fan-out.
+`pull` is how town reads. town mints the assertion for a user, so it reads that user's events
+with that user's own authorisation and needs no credential of its own. `push` is how an
+external integration is served, because nothing there can be asked to poll this service.
 
-An external subscription belongs to one principal. It receives that principal's events
-and nothing else. town delivers for every user, so it must see every event and decide per
-event, and per registered device, whether to notify.
-
-The alternative is one subscription per user, each filtered to that user. That means a
-cursor, a retry state and a failure mode per user, and a new row whenever a user signs up.
-The internal subscription removes all of it. town does the fan-out, because town holds the
-users and the devices.
+An earlier design had one `internal` subscription that took every tenant's events, so town
+could fan out from a single cursor. It needed a credential that is not a user's, and town can
+already speak for any user. Reading per principal therefore removes the subscription, the
+credential, and the invariant that had to protect them.
 
 ### The invariant that protects it
 
-**Only the control plane can create an internal subscription.** No request path may let a
-principal choose `kind`. An internal subscription receives every tenant's events, so a
-principal who could create one would see every other user's runs. Test this as an
-authorisation failure, and not as a validation failure.
+**A pull subscription is created by principal, and never by name.** The operation takes a
+principal and no identity, so a caller cannot create a second subscription for one owner and
+cannot name an owner that is not the one it is authenticated as. The table allows one
+subscription per principal per kind, so two cursors for one owner cannot exist.
 
 ## Storage
 
