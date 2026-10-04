@@ -48,10 +48,10 @@ var (
 	// ErrInvalid means the report is malformed.
 	ErrInvalid = errors.New("invalid report")
 
-	// ErrInternalSubscription means a caller asked for an internal subscription
-	// through the general path. Only the control plane may create one, because it
-	// receives every tenant's events.
-	ErrInternalSubscription = errors.New("internal subscriptions are created by EnsureInternal")
+	// ErrPullSubscription means a caller asked for a pull subscription through the path that
+	// creates push ones. A pull subscription belongs to a principal and is created by
+	// EnsurePull, so nothing can ask for one on someone else's behalf.
+	ErrPullSubscription = errors.New("pull subscriptions are created by EnsurePull")
 )
 
 // maxAttributesBytes caps a payload. Retention is expressed as a count of events, so
@@ -418,18 +418,26 @@ type Run struct {
 	LastSequence int64
 }
 
-// SubscriptionKind separates the two shapes of subscription.
+// SubscriptionKind separates the two ways a subscription is served.
 type SubscriptionKind string
 
 const (
-	// KindInternal is the subscription that town holds. It takes every event,
-	// because town delivers for every user and decides per event and per device.
-	KindInternal SubscriptionKind = "internal"
+	// KindPull is read by the subscriber with a cursor, over the authenticated API. town
+	// uses it: town mints the assertion for a user, so it reads that user's events with the
+	// user's own authorisation and needs no credential of its own.
+	KindPull SubscriptionKind = "pull"
 
-	// KindExternal is a subscription that one principal holds. It takes the events
-	// of that principal and no others.
-	KindExternal SubscriptionKind = "external"
+	// KindPush is delivered to a callback URL. An external integration uses it, because
+	// nothing there can be asked to poll us.
+	KindPush SubscriptionKind = "push"
 )
+
+// Every subscription takes the events of ONE principal and no others.
+//
+// An earlier design had an internal subscription that took every tenant's events, so that
+// town could fan them out from one cursor. It needed a credential that is not a user's, and
+// town can already speak for any user: it mints the assertions. Reading per principal
+// therefore removes a concept, a credential and the invariant that protected it.
 
 // SubscriptionState is the lifecycle state of a subscription.
 type SubscriptionState string
@@ -446,11 +454,16 @@ const (
 
 // Subscription is a durable request for events.
 type Subscription struct {
-	ID          string
-	Kind        SubscriptionKind
+	ID string
+
+	// Kind says how it is served.
+	Kind SubscriptionKind
+
+	// PrincipalID is the owner whose events this subscription takes. Every subscription has
+	// one, and there is no subscription that sees more than one principal's events.
 	PrincipalID string
 
-	// URL and Secret are present for an external subscription only. The URL is
+	// URL and Secret are present for a push subscription only. The URL is
 	// untrusted input and the delivery layer must treat it as such.
 	URL    string
 	Secret string
