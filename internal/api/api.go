@@ -120,11 +120,13 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	// this, and this holds the ownership rule because it holds the records.
 	srv.mux.HandleFunc("POST /api/authorize", srv.requireOwner(srv.handleAuthorize))
 
-	// A workspace's runtime reports that one of its runs changed state. The caller
-	// holds that workspace's capability token, which is a different principal from
-	// town's assertion: town's says which user is asking, and this says which runtime is
-	// reporting.
-	srv.mux.HandleFunc("POST /api/workspaces/{id}/events", srv.requireReporter(srv.handleAppendEvent))
+	// A workspace's runtime reports that one of its runs changed state.
+	//
+	// The route names no workspace. The token does, and the workspace owns the key that
+	// proves the token, so the claim selects a key and the key is what makes the claim
+	// true. The caller therefore has nothing to spoof: it cannot report as a workspace
+	// other than the one its token was minted for.
+	srv.mux.HandleFunc("POST /api/events", srv.requireReporter(srv.handleAppendEvent))
 
 	return srv
 }
