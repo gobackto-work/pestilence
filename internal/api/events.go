@@ -83,6 +83,7 @@ type appendEventRequest struct {
 	EventID    string         `json:"event_id"`
 	RunID      string         `json:"run_id"`
 	State      string         `json:"state"`
+	Mode       string         `json:"mode"`
 	OccurredAt string         `json:"occurred_at"`
 	Attributes map[string]any `json:"attributes"`
 }
@@ -113,6 +114,7 @@ func (s *Server) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
 		WorkspaceID: ws.ID,
 		OwnerID:     ws.OwnerID,
 		State:       eventlog.State(req.State),
+		Mode:        eventlog.Mode(req.Mode),
 		OccurredAt:  occurredAt,
 		Attributes:  req.Attributes,
 	})
@@ -123,6 +125,9 @@ func (s *Server) handleAppendEvent(w http.ResponseWriter, r *http.Request) {
 		// current state next, which is what makes a dropped report recoverable, so
 		// this is a conflict and not a client error.
 		writeError(w, http.StatusConflict, "conflict", "the run cannot move to that state")
+	case errors.Is(err, eventlog.ErrModeChanged):
+		// The mode is fixed by the first report, because it decides the state machine.
+		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, eventlog.ErrInvalid), errors.Is(err, eventlog.ErrInvalidAttribute):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	case err != nil:

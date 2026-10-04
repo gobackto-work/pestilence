@@ -61,6 +61,7 @@ var schema = []string{
         workspace_id  TEXT NOT NULL,
         owner_id      TEXT NOT NULL,
         state         TEXT NOT NULL,
+        mode          TEXT NOT NULL,
         started_at    INTEGER NOT NULL,
         updated_at    INTEGER NOT NULL,
         ended_at      INTEGER,
@@ -172,11 +173,17 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 		return AppendResult{Sequence: sequence}, nil
 	}
 
-	from, lastSequence, err := recordedState(ctx, tx, r.RunID)
+	from, mode, lastSequence, err := recordedState(ctx, tx, r.RunID)
 	if err != nil {
 		return AppendResult{}, err
 	}
-	kind, err := transition(from, r.State)
+	// The mode decides the state machine, so it is set by the first report and every
+	// later report must agree. Without this check a client could turn a batch run into
+	// an interactive one and let it wait for a person who is not there.
+	if from != "" && mode != r.Mode {
+		return AppendResult{}, fmt.Errorf("%w: run %s was recorded as %s", ErrModeChanged, r.RunID, mode)
+	}
+	kind, err := transition(from, r.State, r.Mode)
 	if errors.Is(err, ErrNoTransition) {
 		// A re-assertion of a state the record already holds. It answers with the
 		// sequence that set the state, so the runtime reads it as success.
@@ -213,22 +220,23 @@ func existingEvent(ctx context.Context, tx *sql.Tx, id string) (int64, bool, err
 	return sequence, true, nil
 }
 
-// recordedState returns the state the record holds for a run, and the sequence that set
-// it. A run the record has not seen has no state.
-func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, int64, error) {
+// recordedState returns the state the record holds for a run, the mode it was recorded
+// with, and the sequence that set the state. A run the record has not seen has neither.
+func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, int64, error) {
 	var (
 		state    string
+		mode     string
 		sequence int64
 	)
-	err := tx.QueryRowContext(ctx, `SELECT state, last_sequence FROM runs WHERE id = ?`, runID).
-		Scan(&state, &sequence)
+	err := tx.QueryRowContext(ctx, `SELECT state, mode, last_sequence FROM runs WHERE id = ?`, runID).
+		Scan(&state, &mode, &sequence)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return "", 0, nil
+		return "", "", 0, nil
 	case err != nil:
-		return "", 0, fmt.Errorf("look up run %s: %w", runID, err)
+		return "", "", 0, fmt.Errorf("look up run %s: %w", runID, err)
 	}
-	return State(state), sequence, nil
+	return State(state), Mode(mode), sequence, nil
 }
 
 // insertEvent writes one event and returns its sequence.
@@ -257,15 +265,15 @@ func upsertRun(ctx context.Context, tx *sql.Tx, r Report, at time.Time, sequence
 		ended = millis(at)
 	}
 	_, err := tx.ExecContext(ctx, `
-        INSERT INTO runs (id, workspace_id, owner_id, state,
+        INSERT INTO runs (id, workspace_id, owner_id, state, mode,
                           started_at, updated_at, ended_at, last_sequence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             state         = excluded.state,
             updated_at    = excluded.updated_at,
             ended_at      = COALESCE(excluded.ended_at, runs.ended_at),
             last_sequence = excluded.last_sequence`,
-		r.RunID, r.WorkspaceID, r.OwnerID, string(r.State),
+		r.RunID, r.WorkspaceID, r.OwnerID, string(r.State), string(r.Mode),
 		millis(r.OccurredAt), millis(at), ended, sequence)
 	if err != nil {
 		return fmt.Errorf("update run %s: %w", r.RunID, err)
@@ -326,21 +334,23 @@ func (l *Log) Run(ctx context.Context, id string) (Run, error) {
 	var (
 		r       Run
 		state   string
+		mode    string
 		started int64
 		updated int64
 		ended   sql.NullInt64
 	)
 	err := l.db.QueryRowContext(ctx, `
-        SELECT id, workspace_id, owner_id, state, started_at, updated_at, ended_at, last_sequence
+        SELECT id, workspace_id, owner_id, state, mode,
+               started_at, updated_at, ended_at, last_sequence
         FROM runs WHERE id = ?`, id).
-		Scan(&r.ID, &r.WorkspaceID, &r.OwnerID, &state, &started, &updated, &ended, &r.LastSequence)
+		Scan(&r.ID, &r.WorkspaceID, &r.OwnerID, &state, &mode, &started, &updated, &ended, &r.LastSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}
 	if err != nil {
 		return Run{}, fmt.Errorf("get run %s: %w", id, err)
 	}
-	r.State = State(state)
+	r.State, r.Mode = State(state), Mode(mode)
 	r.StartedAt, r.UpdatedAt = fromMillis(started), fromMillis(updated)
 	if ended.Valid {
 		t := fromMillis(ended.Int64)
