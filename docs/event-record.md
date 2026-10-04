@@ -26,7 +26,7 @@ Three features read the record:
 | Event | One recorded state transition of one run. |
 | Sequence | An integer that orders events in the record. It is unique and it never decreases. |
 | Subscription | A durable request for events, held by one principal. |
-| Sink | A destination for a delivered event. The sinks are SNS and an MCP callback URL. |
+| Sink | A destination for a delivered event. None exists yet: see Not built. |
 | Cursor | The highest sequence a subscription has acknowledged. |
 
 ## Ownership
@@ -329,36 +329,38 @@ becomes a problem, the cursor moves to the run, at the cost of one cursor per ru
 
 ## Subscriptions
 
-One table holds every subscription. A `kind` column separates the two ways one is served.
+One row per principal, holding a cursor and nothing else.
 
-| Column | `pull` | `push` |
-|---|---|---|
-| `id` | ULID | ULID |
-| `principal_id` | the owner whose events it takes | the same |
-| `url` | absent | the callback URL |
-| `secret` | absent | the signing secret |
-| `cursor` | the last acknowledged sequence | the same |
-| `state` | active | active, or failed |
+| Column | Meaning |
+|---|---|
+| `id` | ULID, generated when the row is created |
+| `principal_id` | the owner whose events this subscription takes. Unique, so one owner cannot have two cursors |
+| `cursor` | the last sequence the subscriber acknowledged |
 
-**Every subscription takes the events of ONE principal and no others.** There is no
-subscription that sees more than one, which makes the authorisation a property of the query
-rather than a check that someone has to remember to write.
+**A subscription takes the events of ONE principal and no others.** There is no subscription
+that sees more than one, which makes the authorisation a property of the query rather than a
+check that someone has to remember to write.
 
-`pull` is how town reads. town mints the assertion for a user, so it reads that user's events
-with that user's own authorisation and needs no credential of its own. `push` is how an
-external integration is served, because nothing there can be asked to poll this service.
+A subscriber reads with a cursor over the authenticated API. town is the subscriber: it mints
+the assertion for a user, so it reads that user's events with that user's own authorisation
+and needs no credential of its own.
 
 An earlier design had one `internal` subscription that took every tenant's events, so town
 could fan out from a single cursor. It needed a credential that is not a user's, and town can
 already speak for any user. Reading per principal therefore removes the subscription, the
 credential, and the invariant that had to protect them.
 
+An earlier version of this table also carried a subscription kind, a lifecycle state, a
+callback URL and a signing secret, all of them for a push sink that has no code. They came
+out with it: a column with one legal value is a placeholder for a design rather than a
+design, and the shape the delivery layer needs is not yet known.
+
 ### The invariant that protects it
 
-**A pull subscription is created by principal, and never by name.** The operation takes a
-principal and no identity, so a caller cannot create a second subscription for one owner and
-cannot name an owner that is not the one it is authenticated as. The table allows one
-subscription per principal per kind, so two cursors for one owner cannot exist.
+**A subscription is created by principal, and never by name.** The operation takes a principal
+and no identity, so a caller cannot create a second subscription for one owner and cannot name
+an owner that is not the one it is authenticated as. The table allows one subscription per
+principal, so two cursors for one owner cannot exist.
 
 ## Storage
 
@@ -393,9 +395,8 @@ inside the age limit.
 A subscription that prevents the size limit from being met is a fault. Report it. Do not
 resolve it by discarding an event that nobody has seen.
 
-A subscription whose deliveries pass the retry limit is marked failed and stops holding a
-cursor. A subscriber that is down for a long time therefore cannot hold events past their
-age limit for ever, and the size limit stays reachable.
+A subscriber that is behind holds the record above its size limit, and that is a fault rather
+than a busy day.
 
 ### What the size limit holds
 
@@ -430,57 +431,72 @@ Deletion wins over delivery. A subscriber must not treat a gap as an error.
 
 ## Deletion
 
-Deleting a workspace deletes its runs, its events, and the deliveries for those events.
-A subscription survives, because it belongs to a principal and outlives any one workspace
-of that principal.
+Deleting a workspace deletes its runs and its events. A subscription survives, because it
+belongs to a principal and outlives any one workspace of that principal.
 
 There is no history of a deleted workspace. The transcript lives on the workspace volume
 and is removed with the namespace. A person who needs long-term history needs a feature
 that does not exist yet.
 
-## Delivery to a sink
+## Not built
 
-A delivery row records an attempt. It is not created when an event is appended, because
-the cursor already says what is outstanding. Appending therefore costs one write, and a
-new subscription receives the backlog without a row for every event it has not taken
-yet.
+Four parts of this design have no code. They are recorded because the shape constrains what
+exists, and because a reader should learn what is missing here rather than infer it from an
+absence.
 
-- The control plane retries a failed delivery with backoff.
-- A delivery that exceeds the backoff limit is marked `failed` and reported as a metric.
-  It is not retried again without an operator action.
-- Every delivery is signed with HMAC-SHA256 over the timestamp, the nonce and the body,
-  keyed by the subscription's secret. A receiver can therefore verify the control plane
-  and detect a replay.
+### The push sink
 
-### The town sink
+A push subscription would be delivered to a callback URL that the subscriber supplies. Nothing
+implements it: there is no subscription kind, no delivery row, no retry, and no signature,
+because nothing calls it. The MCP connector is what would.
 
-The control plane does not call SNS. town takes the events and calls SNS, because town
-holds the user and the device registration, so town owns the credentials and the per-user
-policy.
+When it is built:
 
-town reads the events with a cursor, over the same authenticated API it already calls.
-The control plane does not call town. A push from the control plane to town would need a
-second credential, and it would make the control plane a caller of the component that is
-meant to be holding it to account.
+- Each attempt is recorded, with a retry count and a next-attempt time. A delivery row is
+  created by an attempt and not when an event is appended, so that appending costs one write
+  and a new subscription receives the backlog without a row per event.
+- A subscription whose deliveries pass the retry limit stops holding a cursor, so a subscriber
+  that is down for a long time cannot hold events past their age limit for ever.
+- Every delivery is signed with HMAC-SHA256 over the timestamp, the nonce and the body, keyed
+  by the subscription's secret. A receiver can verify this service and detect a replay.
+- The callback URL is untrusted input: HTTPS only, no private, loopback, link-local or
+  cluster-internal address, resolve the name and then connect to the resolved address, no
+  redirect, and a bounded timeout and response body.
 
-Every event carries an idempotency key, so a duplicate delivery does not send two
-notifications.
+### The notification call in town
 
-### The MCP sink
+town takes the events and calls SNS, because town holds the user and the device
+registration, so it owns the credentials and the per-user policy. This service does not call
+SNS.
 
-The MCP callback is a request to a URL that a subscriber supplied. Treat that URL as
-untrusted input:
+town reads the events with a cursor, over the same authenticated API it already calls. This
+service does not call town. A push from this service into town would need a second credential,
+and it would make this service a caller of the component that is meant to be holding it to
+account.
 
-- Accept HTTPS only.
-- Refuse a private, loopback, link-local or cluster-internal address.
-- Resolve the name, then connect to the resolved address. Do not resolve again.
-- Refuse a redirect.
-- Set a timeout and cap the response body.
+Every event carries an idempotency key, so a duplicate notification is discardable.
 
-An MCP subscription is held by one principal. The control plane must filter the events
-for that subscription by that principal's entitlements at delivery time, and not only at
-the time the subscription is created. An entitlement that is removed must stop the
-events.
+### The MCP connector
+
+An MCP server, per the specification version `2026-07-28`, advertising the `events`
+capability. It is a server and not a webhook sender: the integration configures this service
+in its own plugin and subscribes to it.
+
+- `subscriptions/listen` opens a long-lived notification stream, and the client sends a filter.
+  The server must not send a type the client did not ask for.
+- A Triggers and Events working group is writing a standard callback mechanism.
+- The OpenAI platform requires `2026-07-28`, needs persistent subscription storage and
+  outbound HTTPS to callback URLs, and advertises the feature through an `events` capability.
+- **The OpenAI integration supports webhook delivery and callback verification only.** Not
+  polling, not streaming, and not the draft's `gap` and `terminated` control notifications. A
+  design must not depend on those.
+- The notification vocabulary is the notifiable set of kinds, and the payload is the same
+  coarse `attributes` map. Nothing is added for the integration's benefit.
+
+### Run-until-complete
+
+A parent run that resumes when a child run ends. The record holds what it needs, which is the
+child's terminal event and the parent's identity. The behaviour is not implemented.
 
 ## Notification policy
 
@@ -536,13 +552,13 @@ These are testable. Each one has a test.
 1. A repeated `event_id` produces one row.
 2. `sequence` never decreases and is unique.
 3. A run's events have ascending sequences.
-4. A delivery is never made twice for one sink and one event without the same
-   `event_id`.
-5. An event is not delivered to a subscription whose principal is not entitled to its
-   workspace.
-6. An `attributes` map contains no value from the forbidden list.
-7. Deleting a workspace removes its runs and its events.
-8. A callback to a private address is refused.
+4. An event is not read by a subscription whose principal does not own it.
+5. An `attributes` map contains no value from the forbidden list.
+6. A run cannot end without having begun.
+7. A batch run cannot reach `waiting`.
+8. Deleting a workspace removes its runs and its events.
+
+The delivery invariants come with the push sink and are recorded under Not built.
 
 ## Out of scope
 

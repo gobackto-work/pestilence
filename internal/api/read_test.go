@@ -11,25 +11,6 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// ingestOne appends one event for an owner, the way a broker would.
-func ingestOne(t *testing.T, log *eventlog.Log, owner string) eventlog.Event {
-	t.Helper()
-	workspace := ulid.Make().String()
-	report := eventlog.Report{
-		ID: ulid.Make().String(), RunID: ulid.Make().String(), WorkspaceID: workspace,
-		OwnerID: owner, State: eventlog.StateRunning, Mode: eventlog.ModeInteractive,
-		OccurredAt: time.Now().UTC(),
-	}
-	if _, err := log.Append(context.Background(), report); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	events, err := log.EventsAfter(context.Background(), 0, 10)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	return events[len(events)-1]
-}
-
 func readEvents(t *testing.T, srv *Server) eventsResponse {
 	t.Helper()
 	w := do(t, srv, http.MethodGet, "/api/events", "")
@@ -47,7 +28,7 @@ func TestEventsAreReadByTheirOwner(t *testing.T) {
 	srv, _ := newServer(t)
 	log := srv.cfg.Events.(*eventlog.Log)
 
-	want := ingestOne(t, log, testOwner)
+	wantRun, wantSeq := ingestOne(t, log, testOwner)
 	// Another owner's event, which this caller must never see.
 	ingestOne(t, log, "github#999999")
 
@@ -55,14 +36,14 @@ func TestEventsAreReadByTheirOwner(t *testing.T) {
 	if len(got.Events) != 1 {
 		t.Fatalf("read %d events, want 1, so a subscriber saw another principal's run", len(got.Events))
 	}
-	if got.Events[0].RunID != want.RunID {
-		t.Errorf("run id = %q, want %q", got.Events[0].RunID, want.RunID)
+	if got.Events[0].RunID != wantRun {
+		t.Errorf("run id = %q, want %q", got.Events[0].RunID, wantRun)
 	}
 	if got.Events[0].Kind != string(eventlog.KindRunStarted) {
 		t.Errorf("kind = %q, want %q", got.Events[0].Kind, eventlog.KindRunStarted)
 	}
-	if got.Sequence != want.Sequence {
-		t.Errorf("sequence = %d, want %d", got.Sequence, want.Sequence)
+	if got.Sequence != wantSeq {
+		t.Errorf("sequence = %d, want %d", got.Sequence, wantSeq)
 	}
 	if got.Cursor != 0 {
 		t.Errorf("cursor = %d, want 0: a read does not acknowledge", got.Cursor)
@@ -84,9 +65,9 @@ func TestReadingTwiceReturnsTheSameEvents(t *testing.T) {
 func TestAcknowledgingAdvancesTheCursor(t *testing.T) {
 	srv, _ := newServer(t)
 	log := srv.cfg.Events.(*eventlog.Log)
-	event := ingestOne(t, log, testOwner)
+	_, seq := ingestOne(t, log, testOwner)
 
-	body := `{"sequence":` + itoa(event.Sequence) + `}`
+	body := `{"sequence":` + itoa(seq) + `}`
 	if w := do(t, srv, http.MethodPost, "/api/events/ack", body); w.Code != http.StatusNoContent {
 		t.Fatalf("ack: status %d, want 204. body: %s", w.Code, w.Body.String())
 	}
@@ -95,8 +76,8 @@ func TestAcknowledgingAdvancesTheCursor(t *testing.T) {
 	if len(got.Events) != 0 {
 		t.Errorf("read %d events after acknowledging, want 0", len(got.Events))
 	}
-	if got.Cursor != event.Sequence {
-		t.Errorf("cursor = %d, want %d", got.Cursor, event.Sequence)
+	if got.Cursor != seq {
+		t.Errorf("cursor = %d, want %d", got.Cursor, seq)
 	}
 }
 
@@ -106,18 +87,18 @@ func TestTheCursorNeverMovesBackwards(t *testing.T) {
 	srv, _ := newServer(t)
 	log := srv.cfg.Events.(*eventlog.Log)
 
-	first := ingestOne(t, log, testOwner)
-	second := ingestOne(t, log, testOwner)
+	_, first := ingestOne(t, log, testOwner)
+	_, second := ingestOne(t, log, testOwner)
 
-	if w := do(t, srv, http.MethodPost, "/api/events/ack", `{"sequence":`+itoa(second.Sequence)+`}`); w.Code != http.StatusNoContent {
+	if w := do(t, srv, http.MethodPost, "/api/events/ack", `{"sequence":`+itoa(second)+`}`); w.Code != http.StatusNoContent {
 		t.Fatalf("first ack: status %d", w.Code)
 	}
-	if w := do(t, srv, http.MethodPost, "/api/events/ack", `{"sequence":`+itoa(first.Sequence)+`}`); w.Code != http.StatusNoContent {
+	if w := do(t, srv, http.MethodPost, "/api/events/ack", `{"sequence":`+itoa(first)+`}`); w.Code != http.StatusNoContent {
 		t.Fatalf("stale ack: status %d, want 204 and no effect", w.Code)
 	}
 
-	if got := readEvents(t, srv); got.Cursor != second.Sequence {
-		t.Errorf("cursor = %d, want %d", got.Cursor, second.Sequence)
+	if got := readEvents(t, srv); got.Cursor != second {
+		t.Errorf("cursor = %d, want %d", got.Cursor, second)
 	}
 }
 
@@ -145,6 +126,22 @@ func TestEventsNeedAnAssertion(t *testing.T) {
 	if w := doAs(t, srv, "", http.MethodPost, "/api/events/ack", `{"sequence":1}`); w.Code != http.StatusUnauthorized {
 		t.Errorf("ack without an assertion: status %d, want 401", w.Code)
 	}
+}
+
+// ingestOne appends one event for an owner, the way a broker would, and returns the run id
+// and the sequence the record assigned.
+func ingestOne(t *testing.T, log *eventlog.Log, owner string) (runID string, sequence int64) {
+	t.Helper()
+	runID = ulid.Make().String()
+	result, err := log.Append(context.Background(), eventlog.Report{
+		ID: ulid.Make().String(), RunID: runID, WorkspaceID: ulid.Make().String(),
+		OwnerID: owner, State: eventlog.StateRunning, Mode: eventlog.ModeInteractive,
+		OccurredAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	return runID, result.Sequence
 }
 
 // itoa keeps the test bodies readable without pulling strconv in for one call.

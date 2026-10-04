@@ -47,11 +47,6 @@ var (
 
 	// ErrInvalid means the report is malformed.
 	ErrInvalid = errors.New("invalid report")
-
-	// ErrPullSubscription means a caller asked for a pull subscription through the path that
-	// creates push ones. A pull subscription belongs to a principal and is created by
-	// EnsurePull, so nothing can ask for one on someone else's behalf.
-	ErrPullSubscription = errors.New("pull subscriptions are created by EnsurePull")
 )
 
 // maxAttributesBytes caps a payload. Retention is expressed as a count of events, so
@@ -397,41 +392,6 @@ type AppendResult struct {
 	Appended bool
 }
 
-// Run is the retained summary of one run. One row survives when the event rows are
-// pruned.
-type Run struct {
-	ID          string
-	WorkspaceID string
-	OwnerID     string
-	State       State
-
-	// Mode is what the run was recorded with. It does not change.
-	Mode Mode
-
-	StartedAt time.Time
-	UpdatedAt time.Time
-
-	// EndedAt is set when the run reaches a terminal state.
-	EndedAt *time.Time
-
-	// LastSequence is the sequence of the event that last changed the run.
-	LastSequence int64
-}
-
-// SubscriptionKind separates the two ways a subscription is served.
-type SubscriptionKind string
-
-const (
-	// KindPull is read by the subscriber with a cursor, over the authenticated API. town
-	// uses it: town mints the assertion for a user, so it reads that user's events with the
-	// user's own authorisation and needs no credential of its own.
-	KindPull SubscriptionKind = "pull"
-
-	// KindPush is delivered to a callback URL. An external integration uses it, because
-	// nothing there can be asked to poll us.
-	KindPush SubscriptionKind = "push"
-)
-
 // Every subscription takes the events of ONE principal and no others.
 //
 // An earlier design had an internal subscription that took every tenant's events, so that
@@ -439,39 +399,19 @@ const (
 // town can already speak for any user: it mints the assertions. Reading per principal
 // therefore removes a concept, a credential and the invariant that protected it.
 
-// SubscriptionState is the lifecycle state of a subscription.
-type SubscriptionState string
-
-const (
-	// SubscriptionActive means the subscription still holds a cursor.
-	SubscriptionActive SubscriptionState = "active"
-
-	// SubscriptionFailed means delivery passed its retry limit. A failed subscription
-	// stops holding a cursor, so a subscriber that is down for a long time cannot hold
-	// events past their age limit for ever.
-	SubscriptionFailed SubscriptionState = "failed"
-)
-
 // Subscription is a durable request for events.
+//
+// It holds a cursor and nothing else. An earlier version carried a kind, a lifecycle state, a
+// callback URL and a signing secret, all of them for a push sink with no caller. A column
+// with one legal value is a placeholder for a design rather than a design, so they come back
+// with the sink, where a test can exercise them against something real.
 type Subscription struct {
 	ID string
-
-	// Kind says how it is served.
-	Kind SubscriptionKind
 
 	// PrincipalID is the owner whose events this subscription takes. Every subscription has
 	// one, and there is no subscription that sees more than one principal's events.
 	PrincipalID string
 
-	// URL and Secret are present for a push subscription only. The URL is
-	// untrusted input and the delivery layer must treat it as such.
-	URL    string
-	Secret string
-
-	Cursor    int64
-	State     SubscriptionState
-	CreatedAt time.Time
+	// Cursor is the last sequence the subscriber acknowledged.
+	Cursor int64
 }
-
-// Active reports whether the subscription still holds a cursor.
-func (s Subscription) Active() bool { return s.State == SubscriptionActive }

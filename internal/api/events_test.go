@@ -111,10 +111,15 @@ func (f ingestFixture) post(t *testing.T, token, body string) *httptest.Response
 	return w
 }
 
-// recorded returns the events the record holds.
+// recorded returns the events the owner has not taken, through the real read path.
 func (f ingestFixture) recorded(t *testing.T) []eventlog.Event {
 	t.Helper()
-	events, err := f.log.EventsAfter(context.Background(), 0, 100)
+	ctx := context.Background()
+	sub, err := f.log.EnsurePull(ctx, testOwner)
+	if err != nil {
+		t.Fatalf("open the read subscription: %v", err)
+	}
+	_, events, err := f.log.Outstanding(ctx, sub.ID, 100)
 	if err != nil {
 		t.Fatalf("read the record: %v", err)
 	}
