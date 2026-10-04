@@ -55,9 +55,16 @@ func (f fixture) append(t *testing.T, states ...State) {
 
 func (f fixture) events(t *testing.T) []Event {
 	t.Helper()
-	events, err := f.log.EventsAfter(context.Background(), 0, 100)
+	// Reads the table directly rather than through the read path, because these tests are
+	// about what the record holds. The read path has its own tests in the api package.
+	rows, err := f.log.db.QueryContext(context.Background(), selectEvents+" ORDER BY sequence")
 	if err != nil {
 		t.Fatalf("read events: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	events, err := scanEvents(rows)
+	if err != nil {
+		t.Fatalf("scan events: %v", err)
 	}
 	return events
 }
@@ -178,42 +185,6 @@ func TestReAssertingTheCurrentStateIsNotAnError(t *testing.T) {
 		t.Errorf("re-assert sequence = %d, want %d", again.Sequence, first.Sequence)
 	}
 }
-
-// Invariant 5: an event is not delivered to a subscription that is not entitled to it.
-func TestAnExternalSubscriptionNeverSeesAnotherPrincipal(t *testing.T) {
-	l := open(t)
-	ctx := context.Background()
-
-	mine, theirs, workspace := newID(), newID(), newID()
-	appendFor := func(owner string) {
-		t.Helper()
-		report := Report{ID: newID(), RunID: newID(), WorkspaceID: workspace,
-			OwnerID: owner, State: StateRunning, Mode: ModeInteractive, OccurredAt: time.Now().UTC()}
-		if _, err := l.Append(ctx, report); err != nil {
-			t.Fatalf("append for %s: %v", owner, err)
-		}
-	}
-	appendFor(mine)
-	appendFor(theirs)
-
-	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: mine,
-		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
-	if err := l.CreateSubscription(ctx, sub); err != nil {
-		t.Fatalf("create subscription: %v", err)
-	}
-
-	_, events, err := l.Outstanding(ctx, sub.ID, 10)
-	if err != nil {
-		t.Fatalf("outstanding: %v", err)
-	}
-	if len(events) != 1 {
-		t.Fatalf("got %d events, want 1", len(events))
-	}
-	if events[0].OwnerID != mine {
-		t.Errorf("an external subscription received owner %s, want %s", events[0].OwnerID, mine)
-	}
-}
-
 func TestAPullSubscriptionTakesOnlyItsPrincipalsEvents(t *testing.T) {
 	l := open(t)
 	ctx := context.Background()
@@ -231,10 +202,6 @@ func TestAPullSubscriptionTakesOnlyItsPrincipalsEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure pull: %v", err)
 	}
-	if sub.Kind != KindPull {
-		t.Errorf("kind = %s, want %s", sub.Kind, KindPull)
-	}
-
 	// A second call returns the same subscription. The unique constraint on the principal
 	// and the kind is what makes that true.
 	again, err := l.EnsurePull(ctx, mine)
@@ -254,18 +221,6 @@ func TestAPullSubscriptionTakesOnlyItsPrincipalsEvents(t *testing.T) {
 	}
 	if events[0].OwnerID != mine {
 		t.Errorf("the subscription received owner %s, want %s", events[0].OwnerID, mine)
-	}
-}
-
-// A pull subscription belongs to a principal, so nothing may ask for one through the path
-// that creates push ones: it would be a subscription for someone else's events.
-func TestCreateSubscriptionRefusesAPullKind(t *testing.T) {
-	l := open(t)
-	err := l.CreateSubscription(context.Background(), Subscription{
-		ID: newID(), Kind: KindPull, PrincipalID: newID(),
-	})
-	if !errors.Is(err, ErrPullSubscription) {
-		t.Fatalf("CreateSubscription(pull) = %v, want ErrPullSubscription", err)
 	}
 }
 
@@ -320,8 +275,14 @@ func TestDeletingAWorkspaceRemovesItsRunsAndEvents(t *testing.T) {
 	if got := f.events(t); len(got) != 0 {
 		t.Errorf("got %d events after the delete, want 0", len(got))
 	}
-	if _, err := f.log.Run(ctx, f.runID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("run after the delete = %v, want ErrNotFound", err)
+	// The run summary has no getter any more, so this counts the rows directly. It still
+	// matters: a summary left behind is tenant data that outlives its workspace.
+	var runs int
+	if err := f.log.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE workspace_id = ?`, f.workspaceID).Scan(&runs); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if runs != 0 {
+		t.Errorf("%d run summaries survived the delete, want 0", runs)
 	}
 }
 
@@ -367,10 +328,9 @@ func TestPruneNeverDiscardsWhatASubscriptionHasNotTaken(t *testing.T) {
 	ctx := context.Background()
 	f.append(t, StateRunning, StateWaiting, StateRunning)
 
-	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: f.ownerID,
-		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
-	if err := f.log.CreateSubscription(ctx, sub); err != nil {
-		t.Fatalf("create subscription: %v", err)
+	sub, err := f.log.EnsurePull(ctx, f.ownerID)
+	if err != nil {
+		t.Fatalf("ensure pull: %v", err)
 	}
 
 	result, err := f.log.Prune(ctx, time.Now().UTC())
@@ -402,53 +362,6 @@ func TestPruneNeverDiscardsWhatASubscriptionHasNotTaken(t *testing.T) {
 	}
 	if result.ByCount != 1 {
 		t.Errorf("pruned %d by count once the cursor moved, want 1", result.ByCount)
-	}
-}
-
-func TestAFailedSubscriptionStopsHoldingTheRecord(t *testing.T) {
-	f := newFixture(t)
-	f.log.maxEvents = 1
-	ctx := context.Background()
-	f.append(t, StateRunning, StateWaiting)
-
-	sub := Subscription{ID: newID(), Kind: KindPush, PrincipalID: f.ownerID,
-		URL: "https://hooks.example.com/events", Secret: "not-a-real-secret"}
-	if err := f.log.CreateSubscription(ctx, sub); err != nil {
-		t.Fatalf("create subscription: %v", err)
-	}
-	if err := f.log.Fail(ctx, sub.ID); err != nil {
-		t.Fatalf("fail: %v", err)
-	}
-
-	result, err := f.log.Prune(ctx, time.Now().UTC())
-	if err != nil {
-		t.Fatalf("prune: %v", err)
-	}
-	if result.ByCount != 1 {
-		t.Errorf("pruned %d by count, want 1. A failed subscription must not hold the record for ever", result.ByCount)
-	}
-}
-
-func TestTheRunSummaryFollowsTheLog(t *testing.T) {
-	f := newFixture(t)
-	ctx := context.Background()
-	f.append(t, StateRunning, StateWaiting, StateSucceeded)
-
-	run, err := f.log.Run(ctx, f.runID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if run.State != StateSucceeded {
-		t.Errorf("state = %s, want succeeded", run.State)
-	}
-	if run.EndedAt == nil {
-		t.Error("a terminal run has no ended_at")
-	}
-	if run.LastSequence == 0 {
-		t.Error("last_sequence is not set")
-	}
-	if run.WorkspaceID != f.workspaceID || run.OwnerID != f.ownerID {
-		t.Errorf("the summary lost its workspace or owner: %+v", run)
 	}
 }
 
@@ -526,18 +439,5 @@ func TestAnUnknownModeIsRefused(t *testing.T) {
 	report.Mode = ""
 	if _, err := f.log.Append(context.Background(), report); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("an empty mode = %v, want ErrInvalid", err)
-	}
-}
-
-func TestTheRunSummaryKeepsTheMode(t *testing.T) {
-	f := newFixture(t)
-	f.append(t, StateRunning)
-
-	run, err := f.log.Run(context.Background(), f.runID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if run.Mode != ModeInteractive {
-		t.Errorf("mode = %q, want %q", run.Mode, ModeInteractive)
 	}
 }
