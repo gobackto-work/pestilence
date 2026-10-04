@@ -72,34 +72,14 @@ var schema = []string{
 
 	`CREATE INDEX IF NOT EXISTS runs_workspace_idx ON runs(workspace_id)`,
 
-	// url and secret are present for a push subscription only, which the check constraint
-	// records. One subscription per principal per kind: a second pull subscription for the
-	// same owner would be a second cursor, and the two would drift.
+	// One cursor per principal, and nothing else. There is no kind, because there is one way a
+	// subscription is served; no lifecycle state, because nothing can fail one; and no callback
+	// URL or signing secret, because the push sink does not exist. Columns with one legal value
+	// each are a placeholder for the delivery layer rather than the delivery layer.
 	`CREATE TABLE IF NOT EXISTS subscriptions (
         id           TEXT PRIMARY KEY,
-        kind         TEXT NOT NULL,
-        principal_id TEXT NOT NULL,
-        url          TEXT NOT NULL DEFAULT '',
-        secret       TEXT NOT NULL DEFAULT '',
-        cursor       INTEGER NOT NULL DEFAULT 0,
-        state        TEXT NOT NULL,
-        created_at   INTEGER NOT NULL,
-        CHECK (kind IN ('pull', 'push')),
-        CHECK (kind = 'pull' OR (url <> '' AND secret <> '')),
-        UNIQUE (principal_id, kind)
-    )`,
-
-	// A delivery row records an attempt, and it is not created when an event is
-	// appended. The cursor says what is outstanding, so a new subscription receives
-	// the backlog without a row per event, and appending costs one write.
-	`CREATE TABLE IF NOT EXISTS deliveries (
-        subscription_id TEXT NOT NULL,
-        sequence        INTEGER NOT NULL,
-        attempts        INTEGER NOT NULL,
-        next_attempt_at INTEGER NOT NULL,
-        last_error      TEXT NOT NULL DEFAULT '',
-        given_up        INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (subscription_id, sequence)
+        principal_id TEXT NOT NULL UNIQUE,
+        cursor       INTEGER NOT NULL DEFAULT 0
     )`,
 }
 
@@ -285,30 +265,15 @@ func upsertRun(ctx context.Context, tx *sql.Tx, r Report, at time.Time, sequence
 	return nil
 }
 
-// EventsAfter returns events above a sequence, oldest first. It is the read path for
-// a subscriber that holds a cursor.
-func (l *Log) EventsAfter(ctx context.Context, after int64, limit int) ([]Event, error) {
-	rows, err := l.db.QueryContext(ctx, selectEvents+`
-        WHERE sequence > ? ORDER BY sequence LIMIT ?`, after, limit)
-	if err != nil {
-		return nil, fmt.Errorf("read events after %d: %w", after, err)
-	}
-	defer func() { _ = rows.Close() }()
-	return scanEvents(rows)
-}
-
 // Outstanding returns the events that a subscription has not taken, oldest first.
 //
 // Every subscription takes the events of ONE principal and no others, so a principal can
-// never be sent another principal's run. This is the authorisation the read endpoint and the
-// delivery layer both depend on, and it lives here because only the record can apply it.
+// never be sent another principal's run. This is the authorisation the read endpoint depends
+// on, and it lives here because only the record can apply it.
 func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int) (Subscription, []Event, error) {
 	s, err := l.Subscription(ctx, subscriptionID)
 	if err != nil {
 		return Subscription{}, nil, err
-	}
-	if !s.Active() {
-		return s, nil, nil
 	}
 
 	rows, err := l.db.QueryContext(ctx, selectEvents+`
@@ -323,36 +288,6 @@ func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int)
 		return Subscription{}, nil, err
 	}
 	return s, events, nil
-}
-
-// Run returns the retained summary of one run.
-func (l *Log) Run(ctx context.Context, id string) (Run, error) {
-	var (
-		r       Run
-		state   string
-		mode    string
-		started int64
-		updated int64
-		ended   sql.NullInt64
-	)
-	err := l.db.QueryRowContext(ctx, `
-        SELECT id, workspace_id, owner_id, state, mode,
-               started_at, updated_at, ended_at, last_sequence
-        FROM runs WHERE id = ?`, id).
-		Scan(&r.ID, &r.WorkspaceID, &r.OwnerID, &state, &mode, &started, &updated, &ended, &r.LastSequence)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Run{}, ErrNotFound
-	}
-	if err != nil {
-		return Run{}, fmt.Errorf("get run %s: %w", id, err)
-	}
-	r.State, r.Mode = State(state), Mode(mode)
-	r.StartedAt, r.UpdatedAt = fromMillis(started), fromMillis(updated)
-	if ended.Valid {
-		t := fromMillis(ended.Int64)
-		r.EndedAt = &t
-	}
-	return r, nil
 }
 
 // EnsurePull returns the pull subscription for one principal, creating it if it is absent.
@@ -370,47 +305,19 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 	if !opaqueID.MatchString(principalID) {
 		return Subscription{}, fmt.Errorf("%w: principal id %q", ErrInvalid, principalID)
 	}
-	// The unique constraint on (principal_id, kind) makes a concurrent create a no-op rather
-	// than a second cursor.
+	// The unique constraint on the principal makes a concurrent create a no-op rather than a
+	// second cursor.
 	if _, err := l.db.ExecContext(ctx, `
-        INSERT INTO subscriptions (id, kind, principal_id, cursor, state, created_at)
-        VALUES (?, ?, ?, 0, ?, ?)
+        INSERT INTO subscriptions (id, principal_id, cursor)
+        VALUES (?, ?, 0)
         ON CONFLICT DO NOTHING`,
-		ulid.Make().String(), string(KindPull), principalID,
-		string(SubscriptionActive), millis(time.Now().UTC())); err != nil {
+		ulid.Make().String(), principalID); err != nil {
 		return Subscription{}, fmt.Errorf("create the pull subscription for %s: %w", principalID, err)
 	}
 
 	row := l.db.QueryRowContext(ctx, selectSubscriptions+`
-        WHERE principal_id = ? AND kind = ?`, principalID, string(KindPull))
+        WHERE principal_id = ?`, principalID)
 	return scanSubscription(row)
-}
-
-// CreateSubscription creates a push subscription.
-func (l *Log) CreateSubscription(ctx context.Context, s Subscription) error {
-	if s.Kind != KindPush {
-		return fmt.Errorf("%w: use EnsurePull", ErrPullSubscription)
-	}
-	if s.URL == "" || s.Secret == "" || s.PrincipalID == "" {
-		return fmt.Errorf("%w: a push subscription needs a principal, a url and a secret", ErrInvalid)
-	}
-	if err := checkID(s.ID); err != nil {
-		return err
-	}
-	if !opaqueID.MatchString(s.PrincipalID) {
-		return fmt.Errorf("%w: principal id %q", ErrInvalid, s.PrincipalID)
-	}
-	if s.State == "" {
-		s.State = SubscriptionActive
-	}
-	if _, err := l.db.ExecContext(ctx, `
-        INSERT INTO subscriptions (id, kind, principal_id, url, secret, cursor, state, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, string(s.Kind), s.PrincipalID, s.URL, s.Secret, s.Cursor, string(s.State),
-		millis(time.Now().UTC())); err != nil {
-		return fmt.Errorf("create subscription %s: %w", s.ID, err)
-	}
-	return nil
 }
 
 // Subscription returns one subscription.
@@ -429,15 +336,6 @@ func (l *Log) AdvanceCursor(ctx context.Context, id string, to int64) error {
 	if _, err := l.db.ExecContext(ctx,
 		`UPDATE subscriptions SET cursor = ? WHERE id = ? AND cursor < ?`, to, id, to); err != nil {
 		return fmt.Errorf("advance cursor for %s: %w", id, err)
-	}
-	return nil
-}
-
-// Fail marks a subscription as failed, so that it stops holding a cursor.
-func (l *Log) Fail(ctx context.Context, id string) error {
-	if _, err := l.db.ExecContext(ctx,
-		`UPDATE subscriptions SET state = ? WHERE id = ?`, string(SubscriptionFailed), id); err != nil {
-		return fmt.Errorf("fail subscription %s: %w", id, err)
 	}
 	return nil
 }
@@ -464,13 +362,12 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// The bound is the lowest cursor among active subscriptions. Nothing above it may
-	// be discarded, because a subscription has not taken it. With no active
-	// subscription every event is eligible, so the bound is the newest sequence.
+	// The bound is the lowest cursor of any subscription. Nothing above it may be
+	// discarded, because a subscription has not taken it. With no subscription at all every
+	// event is eligible, so the bound is the newest sequence.
 	var lowest sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT MIN(cursor) FROM subscriptions WHERE state = ?`,
-		string(SubscriptionActive)).Scan(&lowest); err != nil {
+		`SELECT MIN(cursor) FROM subscriptions`).Scan(&lowest); err != nil {
 		return PruneResult{}, fmt.Errorf("lowest cursor: %w", err)
 	}
 	var bound int64
@@ -519,8 +416,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	return out, nil
 }
 
-// DeleteWorkspace removes a workspace's runs and events, and the deliveries for those
-// events.
+// DeleteWorkspace removes a workspace's runs and events.
 //
 // Subscriptions survive. A subscription belongs to a principal and outlives any one
 // workspace of that principal.
@@ -531,13 +427,6 @@ func (l *Log) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Deliveries go first. Nothing enforces the reference to a sequence, because a
-	// foreign key to a table that prunes its rows would fight the prune.
-	if _, err := tx.ExecContext(ctx, `
-        DELETE FROM deliveries WHERE sequence IN
-            (SELECT sequence FROM events WHERE workspace_id = ?)`, workspaceID); err != nil {
-		return fmt.Errorf("delete deliveries for workspace %s: %w", workspaceID, err)
-	}
 	for _, stmt := range []string{
 		`DELETE FROM events WHERE workspace_id = ?`,
 		`DELETE FROM runs WHERE workspace_id = ?`,
@@ -556,27 +445,19 @@ const selectEvents = `SELECT sequence, event_id, run_id, workspace_id, owner_id,
                              previous_state, state, occurred_at, recorded_at, attributes
                       FROM events`
 
-const selectSubscriptions = `SELECT id, kind, principal_id, url, secret, cursor, state, created_at
-                             FROM subscriptions`
+const selectSubscriptions = `SELECT id, principal_id, cursor FROM subscriptions`
 
 // scanSubscription reads one subscription row. It maps sql.ErrNoRows to ErrNotFound, so a
 // caller does not have to import database/sql to tell the two apart.
 func scanSubscription(row *sql.Row) (Subscription, error) {
-	var (
-		s         Subscription
-		kind      string
-		state     string
-		createdAt int64
-	)
-	err := row.Scan(&s.ID, &kind, &s.PrincipalID, &s.URL, &s.Secret, &s.Cursor, &state, &createdAt)
+	var s Subscription
+	err := row.Scan(&s.ID, &s.PrincipalID, &s.Cursor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Subscription{}, ErrNotFound
 	}
 	if err != nil {
 		return Subscription{}, fmt.Errorf("read subscription: %w", err)
 	}
-	s.Kind, s.State = SubscriptionKind(kind), SubscriptionState(state)
-	s.CreatedAt = fromMillis(createdAt)
 	return s, nil
 }
 
