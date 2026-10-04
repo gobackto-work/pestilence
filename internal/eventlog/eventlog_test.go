@@ -40,7 +40,7 @@ func newFixture(t *testing.T) fixture {
 func (f fixture) report(state State) Report {
 	return Report{
 		ID: newID(), RunID: f.runID, WorkspaceID: f.workspaceID, OwnerID: f.ownerID,
-		State: state, OccurredAt: time.Now().UTC(),
+		State: state, Mode: ModeInteractive, OccurredAt: time.Now().UTC(),
 	}
 }
 
@@ -188,7 +188,7 @@ func TestAnExternalSubscriptionNeverSeesAnotherPrincipal(t *testing.T) {
 	appendFor := func(owner string) {
 		t.Helper()
 		report := Report{ID: newID(), RunID: newID(), WorkspaceID: workspace,
-			OwnerID: owner, State: StateRunning, OccurredAt: time.Now().UTC()}
+			OwnerID: owner, State: StateRunning, Mode: ModeInteractive, OccurredAt: time.Now().UTC()}
 		if _, err := l.Append(ctx, report); err != nil {
 			t.Fatalf("append for %s: %v", owner, err)
 		}
@@ -221,7 +221,7 @@ func TestTheInternalSubscriptionTakesEveryEvent(t *testing.T) {
 	workspace := newID()
 	for range 2 {
 		report := Report{ID: newID(), RunID: newID(), WorkspaceID: workspace,
-			OwnerID: newID(), State: StateRunning, OccurredAt: time.Now().UTC()}
+			OwnerID: newID(), State: StateRunning, Mode: ModeInteractive, OccurredAt: time.Now().UTC()}
 		if _, err := l.Append(ctx, report); err != nil {
 			t.Fatalf("append: %v", err)
 		}
@@ -481,5 +481,58 @@ func TestAnEmptyPayloadRoundTrips(t *testing.T) {
 	}
 	if len(got[0].Attributes) != 0 {
 		t.Errorf("attributes = %+v, want empty", got[0].Attributes)
+	}
+}
+
+// A batch run has nobody to answer it, so it cannot reach a state that waits for a
+// person. Without this rule a parent waiting on a worker would wait for ever.
+func TestABatchRunCannotWaitForAPerson(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	start := f.report(StateRunning)
+	start.Mode = ModeBatch
+	if _, err := f.log.Append(ctx, start); err != nil {
+		t.Fatalf("a batch run cannot start: %v", err)
+	}
+
+	waiting := f.report(StateWaiting)
+	waiting.Mode = ModeBatch
+	if _, err := f.log.Append(ctx, waiting); !errors.Is(err, ErrTransition) {
+		t.Fatalf("a batch run reached waiting: %v, want ErrTransition", err)
+	}
+}
+
+// The mode decides the state machine, so the first report fixes it.
+func TestTheModeOfARunCannotChange(t *testing.T) {
+	f := newFixture(t)
+	f.append(t, StateRunning)
+
+	changed := f.report(StateWaiting)
+	changed.Mode = ModeBatch
+	if _, err := f.log.Append(context.Background(), changed); !errors.Is(err, ErrModeChanged) {
+		t.Fatalf("a mode change = %v, want ErrModeChanged", err)
+	}
+}
+
+func TestAnUnknownModeIsRefused(t *testing.T) {
+	f := newFixture(t)
+	report := f.report(StateRunning)
+	report.Mode = ""
+	if _, err := f.log.Append(context.Background(), report); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("an empty mode = %v, want ErrInvalid", err)
+	}
+}
+
+func TestTheRunSummaryKeepsTheMode(t *testing.T) {
+	f := newFixture(t)
+	f.append(t, StateRunning)
+
+	run, err := f.log.Run(context.Background(), f.runID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if run.Mode != ModeInteractive {
+		t.Errorf("mode = %q, want %q", run.Mode, ModeInteractive)
 	}
 }

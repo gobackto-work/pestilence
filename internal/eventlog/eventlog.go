@@ -37,6 +37,10 @@ var (
 	// most of those reports describe a state the record already has.
 	ErrNoTransition = errors.New("state is already recorded")
 
+	// ErrModeChanged means a report declared a mode that differs from the one the run was
+	// recorded with. A run's mode decides its state machine, so it cannot change.
+	ErrModeChanged = errors.New("the run's mode cannot change")
+
 	// ErrInvalidAttribute means an attribute is outside the closed schema. It is the
 	// payload rule, enforced.
 	ErrInvalidAttribute = errors.New("invalid attribute")
@@ -68,6 +72,30 @@ const (
 	StateCancelled       State = "cancelled"
 	StateBudgetExhausted State = "budget_exhausted"
 )
+
+// Mode says whether a run can block on a person. It is the property that decides which
+// states the run can reach, so it is part of the record and not a display detail.
+type Mode string
+
+const (
+	// ModeInteractive is a run with a person at the other end. It reaches `waiting` when
+	// the agent asks a question, and `resumed` when the answer arrives. The root agent is
+	// the interactive run.
+	ModeInteractive Mode = "interactive"
+
+	// ModeBatch is a run nobody can answer: a worker, spawned as a job. It never reaches
+	// `waiting`, because a run that waits for a person who is not there waits for ever.
+	ModeBatch Mode = "batch"
+)
+
+// Valid reports whether the mode is one of the closed set.
+func (m Mode) Valid() bool {
+	switch m {
+	case ModeInteractive, ModeBatch:
+		return true
+	}
+	return false
+}
 
 // Kind is the transition that one event records.
 type Kind string
@@ -129,12 +157,13 @@ func terminalKind(s State) Kind {
 	return ""
 }
 
-// transition derives the event from the state a run leaves and the state it enters.
+// transition derives the event from the state a run leaves, the state it enters, and the
+// mode the run was recorded with.
 //
-// The runtime reports a state and this package derives the event. A runtime that
-// computed its own kind could disagree with the record, and the disagreement would be
-// silent. A state that is not reachable is refused.
-func transition(from, to State) (Kind, error) {
+// The runtime reports a state and this package derives the event. A runtime that computed
+// its own kind could disagree with the record, and the disagreement would be silent. A
+// state that is not reachable is refused.
+func transition(from, to State, mode Mode) (Kind, error) {
 	if !to.Valid() {
 		return "", fmt.Errorf("%w: unknown state %q", ErrTransition, to)
 	}
@@ -155,6 +184,11 @@ func transition(from, to State) (Kind, error) {
 	}
 	switch {
 	case from == StateRunning && to == StateWaiting:
+		if mode != ModeInteractive {
+			// Without this a batch run could ask for input that can never arrive, and a
+			// parent waiting on that run would wait for ever.
+			return "", fmt.Errorf("%w: a %s run cannot wait for a person", ErrTransition, mode)
+		}
 		return KindRunWaiting, nil
 	case from == StateWaiting && to == StateRunning:
 		return KindRunResumed, nil
@@ -276,6 +310,10 @@ type Report struct {
 	// State is the state the run entered. It is the only state a caller reports.
 	State State
 
+	// Mode says whether the run can block on a person. The first report of a run sets it,
+	// and every later report must agree.
+	Mode Mode
+
 	// OccurredAt is when the runtime observed the transition.
 	OccurredAt time.Time
 
@@ -308,6 +346,9 @@ func (r Report) Validate() error {
 	}
 	if !r.State.Valid() {
 		return fmt.Errorf("%w: unknown state %q", ErrInvalid, r.State)
+	}
+	if !r.Mode.Valid() {
+		return fmt.Errorf("%w: unknown mode %q", ErrInvalid, r.Mode)
 	}
 	if r.OccurredAt.IsZero() {
 		return fmt.Errorf("%w: occurred_at is required", ErrInvalid)
@@ -363,8 +404,12 @@ type Run struct {
 	WorkspaceID string
 	OwnerID     string
 	State       State
-	StartedAt   time.Time
-	UpdatedAt   time.Time
+
+	// Mode is what the run was recorded with. It does not change.
+	Mode Mode
+
+	StartedAt time.Time
+	UpdatedAt time.Time
 
 	// EndedAt is set when the run reaches a terminal state.
 	EndedAt *time.Time
