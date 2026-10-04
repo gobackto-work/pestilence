@@ -191,6 +191,12 @@ prompt that lies. The broker derives a worker's state from the cluster, and it a
 report about the root run only from the root agent, which is the authority on its own
 session.
 
+**A run that begins and ends between two observations still records both events.** An observer
+that reports only what it sees can miss a short run's start entirely, and a terminal state on
+its own is refused: a run cannot end without having begun. So a reporter asserts the start it
+knows happened before it reports an end, and never derives a start from an observation it may
+not get to make. This is what stops a short-lived worker from being invisible.
+
 The control plane derives `previous_state` from the run it holds, so two reporters cannot
 corrupt the record. That property is what lets the bridge and the broker both write to one
 run without an extra protocol.
