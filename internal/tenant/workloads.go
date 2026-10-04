@@ -273,6 +273,7 @@ func (s Spec) brokerContainer() corev1.Container {
 				ReadOnly:  true,
 			},
 			{Name: "token-pubkey", MountPath: tokenPubkeyDir, ReadOnly: true},
+			{Name: "report-token", MountPath: MountReportToken, ReadOnly: true},
 		},
 	}
 	if s.BrokerTLS {
@@ -321,6 +322,15 @@ func (s Spec) brokerVolumes() []corev1.Volume {
 				},
 			},
 		},
+		// The broker's reporting token, beside it in the platform namespace. Always
+		// mounted: the Secret is always emitted, and a broker without it cannot report at
+		// all, which is a failure that would appear only as missing notifications.
+		{
+			Name: "report-token",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: s.ReportTokenSecretName()},
+			},
+		},
 	}
 	// Gated on BrokerTLS, so the Secret's mere existence changes nothing. Turning this
 	// on without the matching switch on the agent side would leave the broker serving
@@ -335,6 +345,17 @@ func (s Spec) brokerVolumes() []corev1.Volume {
 	}
 	return volumes
 }
+
+// PlatformURL is where the broker reports a run's state.
+//
+// It is the control plane's in-cluster Service. A constant and not a parameter, because
+// the Service name and its namespace are fixed by the chart, and a value that must agree
+// on both sides is better spelled once than configured in two places.
+const PlatformURL = "http://pestilence." + DefaultControlPlaneNamespace + ".svc:8080"
+
+// MountReportToken is where the broker mounts its reporting token. The file inside it is
+// TokenDataKey.
+const MountReportToken = "/var/run/scarab/report-token"
 
 // brokerEnv mirrors §6.4. The budget values are derived from the same Limits the
 // ResourceQuota is built from, because the broker cannot read the quota itself:
@@ -365,6 +386,11 @@ func (s Spec) brokerEnv() []corev1.EnvVar {
 		// The token VERIFICATION key, which is a different thing from the
 		// broker's own API token. The broker refuses to start without it.
 		{Name: "SCARAB_TOKEN_PUBLIC_KEY", Value: tokenPubkeyPath},
+		// Reporting. The broker is the only component that reports run state, so it is the
+		// only one that needs to know where the control plane is and to hold a credential
+		// for it.
+		{Name: "SCARAB_PLATFORM_URL", Value: PlatformURL},
+		{Name: "SCARAB_REPORT_TOKEN_PATH", Value: MountReportToken + "/" + TokenDataKey},
 	}
 	if s.BrokerTLS {
 		env = append(env,
