@@ -114,3 +114,54 @@ func (s *Server) handleAckEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// runBatchLimit bounds one read of the log.
+const runBatchLimit = 50
+
+// runPayload is one run as a reader sees it.
+//
+// It carries no owner, because the caller IS the owner: the assertion said so. It carries the
+// workspace id and not its slug, because the record does not duplicate the registry. A reader
+// that needs a name joins it with the workspace it already has.
+type runPayload struct {
+	ID           string `json:"id"`
+	WorkspaceID  string `json:"workspace_id"`
+	State        string `json:"state"`
+	Mode         string `json:"mode"`
+	StartedAt    string `json:"started_at"`
+	UpdatedAt    string `json:"updated_at"`
+	EndedAt      string `json:"ended_at,omitempty"`
+	LastSequence int64  `json:"last_sequence"`
+}
+
+// handleRuns returns the owner's runs, most recently changed first.
+//
+// This is the log and not the queue. It takes no cursor and acknowledges nothing, so a reader
+// can call it as often as it likes without consuming anything or holding the retention bound
+// at zero.
+func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.cfg.Events.Runs(r.Context(), ownerFrom(r.Context()), runBatchLimit)
+	if err != nil {
+		s.log.Error("could not read the run log", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read runs")
+		return
+	}
+
+	out := make([]runPayload, 0, len(runs))
+	for _, run := range runs {
+		payload := runPayload{
+			ID:           run.ID,
+			WorkspaceID:  run.WorkspaceID,
+			State:        string(run.State),
+			Mode:         string(run.Mode),
+			StartedAt:    run.StartedAt.Format(time.RFC3339Nano),
+			UpdatedAt:    run.UpdatedAt.Format(time.RFC3339Nano),
+			LastSequence: run.LastSequence,
+		}
+		if run.EndedAt != nil {
+			payload.EndedAt = run.EndedAt.Format(time.RFC3339Nano)
+		}
+		out = append(out, payload)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
