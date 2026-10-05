@@ -197,6 +197,17 @@ its own is refused: a run cannot end without having begun. So a reporter asserts
 knows happened before it reports an end, and never derives a start from an observation it may
 not get to make. This is what stops a short-lived worker from being invisible.
 
+**The signal for a pause is one specific runtime event, and the similar one is wrong.** Pi
+emits two boundaries that look alike. `agent_end` marks the end of one low-level agent run.
+`agent_settled` means Pi will not continue on its own. Retries, overflow recovery, compaction,
+steering and follow-up work all follow an `agent_end`, so a reporter that treats it as the end
+of the turn records `waiting` at every internal boundary and tells a person to come back when
+nobody has asked them anything. `agent_settled` is the signal, and there is one per turn.
+
+A prompt can also be handled without starting a run. Then no start arrives, and a reporter
+that waits for a settle waits for ever. Report what the runtime emits and nothing else: no
+start, no record.
+
 The control plane derives `previous_state` from the run it holds, so two reporters cannot
 corrupt the record. That property is what lets the bridge and the broker both write to one
 run without an extra protocol.
