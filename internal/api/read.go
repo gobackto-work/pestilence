@@ -17,13 +17,13 @@ const eventBatchLimit = 200
 // What a notification needs is the kind, and that is here.
 type eventPayload struct {
 	Sequence      int64          `json:"sequence"`
-	RunID         string         `json:"run_id"`
-	WorkspaceID   string         `json:"workspace_id"`
+	RunID         string         `json:"runId"`
+	WorkspaceID   string         `json:"workspaceId"`
 	Kind          string         `json:"kind"`
-	PreviousState string         `json:"previous_state"`
+	PreviousState string         `json:"previousState"`
 	State         string         `json:"state"`
-	OccurredAt    string         `json:"occurred_at"`
-	RecordedAt    string         `json:"recorded_at"`
+	OccurredAt    string         `json:"occurredAt"`
+	RecordedAt    string         `json:"recordedAt"`
 	Attributes    map[string]any `json:"attributes,omitempty"`
 }
 
@@ -125,13 +125,13 @@ const runBatchLimit = 50
 // that needs a name joins it with the workspace it already has.
 type runPayload struct {
 	ID           string `json:"id"`
-	WorkspaceID  string `json:"workspace_id"`
+	WorkspaceID  string `json:"workspaceId"`
 	State        string `json:"state"`
 	Mode         string `json:"mode"`
-	StartedAt    string `json:"started_at"`
-	UpdatedAt    string `json:"updated_at"`
-	EndedAt      string `json:"ended_at,omitempty"`
-	LastSequence int64  `json:"last_sequence"`
+	StartedAt    string `json:"startedAt"`
+	UpdatedAt    string `json:"updatedAt"`
+	EndedAt      string `json:"endedAt,omitempty"`
+	LastSequence int64  `json:"lastSequence"`
 }
 
 // handleRuns returns the owner's runs, most recently changed first.

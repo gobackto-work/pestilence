@@ -127,8 +127,8 @@ func (f ingestFixture) recorded(t *testing.T) []eventlog.Event {
 }
 
 func reportBody(eventID, runID, state string) string {
-	return `{"event_id":"` + eventID + `","run_id":"` + runID + `","state":"` + state +
-		`","mode":"interactive","occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
+	return `{"eventId":"` + eventID + `","runId":"` + runID + `","state":"` + state +
+		`","mode":"interactive","occurredAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 }
 
 func TestAppendEventRecordsAReportedState(t *testing.T) {
@@ -281,8 +281,8 @@ func TestABatchRunCannotWait(t *testing.T) {
 	f := newIngestFixture(t)
 	runID := ulid.Make().String()
 	batch := func(state string) string {
-		return `{"event_id":"` + ulid.Make().String() + `","run_id":"` + runID +
-			`","state":"` + state + `","mode":"batch","occurred_at":"` +
+		return `{"eventId":"` + ulid.Make().String() + `","runId":"` + runID +
+			`","state":"` + state + `","mode":"batch","occurredAt":"` +
 			time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 	}
 
@@ -298,9 +298,9 @@ func TestABatchRunCannotWait(t *testing.T) {
 // run to another user. An unknown field is refused rather than ignored.
 func TestAppendEventCannotChooseTheOwner(t *testing.T) {
 	f := newIngestFixture(t)
-	body := `{"event_id":"` + ulid.Make().String() + `","run_id":"` + ulid.Make().String() +
+	body := `{"eventId":"` + ulid.Make().String() + `","runId":"` + ulid.Make().String() +
 		`","state":"running","mode":"interactive","owner_id":"someone-else",` +
-		`"occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
+		`"occurredAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 
 	if w := f.post(t, f.token, body); w.Code != http.StatusBadRequest {
 		t.Errorf("status %d, want 400. body: %s", w.Code, w.Body.String())
@@ -309,9 +309,9 @@ func TestAppendEventCannotChooseTheOwner(t *testing.T) {
 
 func TestAppendEventRefusesAnUnknownAttribute(t *testing.T) {
 	f := newIngestFixture(t)
-	body := `{"event_id":"` + ulid.Make().String() + `","run_id":"` + ulid.Make().String() +
+	body := `{"eventId":"` + ulid.Make().String() + `","runId":"` + ulid.Make().String() +
 		`","state":"running","mode":"interactive","attributes":{"prompt":"summarise my repository"},` +
-		`"occurred_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
+		`"occurredAt":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
 
 	if w := f.post(t, f.token, body); w.Code != http.StatusBadRequest {
 		t.Errorf("status %d, want 400. body: %s", w.Code, w.Body.String())

@@ -95,11 +95,11 @@ func (s *Server) rejectReporter(w http.ResponseWriter, slug string, err error) {
 // reason the owner of a workspace comes from the assertion and from nothing else: a
 // caller-supplied field would be spoofable.
 type appendEventRequest struct {
-	EventID    string         `json:"event_id"`
-	RunID      string         `json:"run_id"`
+	EventID    string         `json:"eventId"`
+	RunID      string         `json:"runId"`
 	State      string         `json:"state"`
 	Mode       string         `json:"mode"`
-	OccurredAt string         `json:"occurred_at"`
+	OccurredAt string         `json:"occurredAt"`
 	Attributes map[string]any `json:"attributes"`
 }
 
