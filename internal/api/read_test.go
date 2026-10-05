@@ -156,3 +156,37 @@ func itoa(n int64) string {
 	}
 	return string(digits)
 }
+
+// The log read is owner-scoped like every other route a user calls, and it consumes nothing.
+func TestRunsAreReadByTheirOwner(t *testing.T) {
+	srv, _ := newServer(t)
+	log := srv.cfg.Events.(*eventlog.Log)
+
+	runID, _ := ingestOne(t, log, testOwner)
+	ingestOne(t, log, "github#999999")
+
+	w := do(t, srv, http.MethodGet, "/api/runs", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200. body: %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Runs []runPayload `json:"runs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Runs) != 1 {
+		t.Fatalf("read %d runs, want 1, so the list leaked another owner's", len(out.Runs))
+	}
+	if out.Runs[0].ID != runID {
+		t.Errorf("run id = %q, want %q", out.Runs[0].ID, runID)
+	}
+	if out.Runs[0].State != string(eventlog.StateRunning) {
+		t.Errorf("state = %q, want running", out.Runs[0].State)
+	}
+
+	// Reading the log does not touch the event cursor, so it cannot hold the retention bound.
+	if got := readEvents(t, srv); got.Cursor != 0 {
+		t.Errorf("cursor = %d after reading the log, want 0: reading it consumed something", got.Cursor)
+	}
+}

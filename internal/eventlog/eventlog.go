@@ -399,6 +399,33 @@ type AppendResult struct {
 // town can already speak for any user: it mints the assertions. Reading per principal
 // therefore removes a concept, a credential and the invariant that protected it.
 
+// Run is the retained summary of one run. One row survives when the event rows are pruned.
+//
+// This is the LOG, and the events are the QUEUE. A reader that wants to show what has happened
+// reads here. A reader that wants to deliver events reads them with a cursor and acknowledges
+// them, and it must acknowledge: the lowest cursor of any subscription is also the retention
+// bound, so a consumer that reads and never acknowledges pins the bound at zero and the record
+// never prunes, by age as well as by count.
+type Run struct {
+	ID          string
+	WorkspaceID string
+	OwnerID     string
+	State       State
+
+	// Mode is what the run was recorded with. It does not change.
+	Mode Mode
+
+	StartedAt time.Time
+	UpdatedAt time.Time
+
+	// EndedAt is set when the run reached a terminal state.
+	EndedAt *time.Time
+
+	// LastSequence is the sequence of the event that last changed the run. It orders the list,
+	// and it is unique per run, which a timestamp is not.
+	LastSequence int64
+}
+
 // Subscription is a durable request for events.
 //
 // It holds a cursor and nothing else. An earlier version carried a kind, a lifecycle state, a

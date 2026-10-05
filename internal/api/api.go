@@ -75,6 +75,9 @@ type EventRecord interface {
 	Outstanding(ctx context.Context, subscriptionID string, limit int) (eventlog.Subscription, []eventlog.Event, error)
 	// AdvanceCursor records what a subscriber has taken.
 	AdvanceCursor(ctx context.Context, id string, to int64) error
+	// Runs returns an owner's runs, most recently changed first. This is the log and not
+	// the queue: it takes no cursor and acknowledges nothing.
+	Runs(ctx context.Context, ownerID string, limit int) ([]eventlog.Run, error)
 }
 
 // TokenKeySource resolves the public key that signs one workspace's capability token.
@@ -140,6 +143,10 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	// others, so there is nothing here that can read another user's runs.
 	srv.mux.HandleFunc("GET /api/events", srv.requireOwner(srv.handleEvents))
 	srv.mux.HandleFunc("POST /api/events/ack", srv.requireOwner(srv.handleAckEvents))
+
+	// The log, for a reader that wants to show what has happened. It takes no cursor, so it
+	// consumes nothing and blocks nothing.
+	srv.mux.HandleFunc("GET /api/runs", srv.requireOwner(srv.handleRuns))
 
 	return srv
 }

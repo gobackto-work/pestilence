@@ -441,3 +441,62 @@ func TestAnUnknownModeIsRefused(t *testing.T) {
 		t.Fatalf("an empty mode = %v, want ErrInvalid", err)
 	}
 }
+
+// The log, which a reader shows. The events are the queue and this is not.
+func TestRunsAreListedMostRecentlyChangedFirst(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A second run in the same workspace, so the order cannot come from insertion alone.
+	older := f.report(StateRunning)
+	older.RunID = newID()
+	if _, err := f.log.Append(ctx, older); err != nil {
+		t.Fatalf("append the older run: %v", err)
+	}
+	f.append(t, StateRunning, StateWaiting)
+
+	runs, err := f.log.Runs(ctx, f.ownerID, 10)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("got %d runs, want 2", len(runs))
+	}
+	if runs[0].ID != f.runID {
+		t.Errorf("the first run is %s, want the one changed last (%s)", runs[0].ID, f.runID)
+	}
+	if runs[0].State != StateWaiting || runs[0].Mode != ModeInteractive {
+		t.Errorf("state/mode = %s/%s, want waiting/interactive", runs[0].State, runs[0].Mode)
+	}
+	if runs[0].EndedAt != nil {
+		t.Error("a run that has not ended carries an ended_at")
+	}
+	if runs[0].LastSequence == 0 {
+		t.Error("last_sequence is not set, so the list has no order")
+	}
+}
+
+func TestRunsAreScopedToTheirOwner(t *testing.T) {
+	l := open(t)
+	ctx := context.Background()
+
+	mine, theirs, workspace := newID(), newID(), newID()
+	for _, owner := range []string{mine, theirs} {
+		report := Report{ID: newID(), RunID: newID(), WorkspaceID: workspace,
+			OwnerID: owner, State: StateRunning, Mode: ModeBatch, OccurredAt: time.Now().UTC()}
+		if _, err := l.Append(ctx, report); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	runs, err := l.Runs(ctx, mine, 10)
+	if err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1, so the log leaked another owner's runs", len(runs))
+	}
+	if runs[0].OwnerID != mine {
+		t.Errorf("the run belongs to %s, want %s", runs[0].OwnerID, mine)
+	}
+}

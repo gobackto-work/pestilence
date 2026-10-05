@@ -290,6 +290,50 @@ func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int)
 	return s, events, nil
 }
 
+// Runs returns an owner's runs, most recently changed first.
+//
+// The LOG and not the queue. A run summary survives the pruning of its events, so this is what
+// a reader who wants to show what has happened reads. It takes no cursor and acknowledges
+// nothing, and that is the point: the lowest cursor of any subscription is also the retention
+// bound, so a consumer that reads the events and never acknowledges pins the bound at zero.
+//
+// It is ordered by last_sequence, which is unique per run. A timestamp would tie, and a list
+// that reorders itself between two reads is hard to trust.
+func (l *Log) Runs(ctx context.Context, ownerID string, limit int) ([]Run, error) {
+	rows, err := l.db.QueryContext(ctx, `
+        SELECT id, workspace_id, owner_id, state, mode,
+               started_at, updated_at, ended_at, last_sequence
+        FROM runs WHERE owner_id = ? ORDER BY last_sequence DESC LIMIT ?`, ownerID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read runs for %s: %w", ownerID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Run
+	for rows.Next() {
+		var (
+			r       Run
+			state   string
+			mode    string
+			started int64
+			updated int64
+			ended   sql.NullInt64
+		)
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.OwnerID, &state, &mode,
+			&started, &updated, &ended, &r.LastSequence); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		r.State, r.Mode = State(state), Mode(mode)
+		r.StartedAt, r.UpdatedAt = fromMillis(started), fromMillis(updated)
+		if ended.Valid {
+			t := fromMillis(ended.Int64)
+			r.EndedAt = &t
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // EnsurePull returns the pull subscription for one principal, creating it if it is absent.
 //
 // A principal is town's identifier and not ours, so it is bounded and not format-checked. That
