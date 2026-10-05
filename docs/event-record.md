@@ -242,12 +242,16 @@ The body names the run and the state:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `event_id` | yes | The idempotency key. A retry carries the same value. |
-| `run_id` | yes | The run. Its format belongs to the runtime. |
+| `eventId` | yes | The idempotency key. A retry carries the same value. |
+| `runId` | yes | The run. Its format belongs to the runtime. |
 | `state` | yes | The state the run entered. |
 | `mode` | yes | `interactive` or `batch`. The first report sets it. |
-| `occurred_at` | yes | RFC 3339, when the runtime observed the transition. |
+| `occurredAt` | yes | RFC 3339, when the runtime observed the transition. |
 | `attributes` | no | The closed payload. |
+
+**Names here are the wire's, and the tables above are the record's.** A column is
+`snake_case` because SQL is, and JSON is `camelCase` because the rest of this API is. They
+name the same values. Writing them as one name is how a rename ends up half done.
 
 The body cannot name the workspace or the owner. Both come from the record and from the
 token, so a broker cannot report for another workspace or attribute its run to another
@@ -328,6 +332,26 @@ A subscription reads events with a cursor.
 
 A subscriber that loses its cursor re-reads from an earlier position and discards
 duplicates. A subscriber must therefore be idempotent on `sequence`.
+
+### The read endpoints
+
+Both are owner-scoped: the owner comes from the assertion, so a caller reads its own runs and
+nobody else's.
+
+    GET  /api/events        the events this owner has not acknowledged
+    POST /api/events/ack    {"sequence": N}
+
+A read does not acknowledge. One that did would lose an event whenever the reader failed
+between reading and acting, so the subscriber acknowledges, and until it does the events are
+still there. The cursor only moves forward.
+
+    GET  /api/runs          the runs this owner has, most recently changed first
+
+The run list is the LOG and not the queue. It takes no cursor and acknowledges nothing, so a
+reader can call it as often as it likes without consuming anything. **A reader that shows what
+has happened uses this one.** The cursor is also the retention bound, so a consumer that reads
+the events and never acknowledges pins the bound at zero and the record stops pruning, by age
+as well as by count.
 
 Ordering is guaranteed within one run, because a run's events have ascending sequences.
 Ordering between runs is not guaranteed and is not useful.
