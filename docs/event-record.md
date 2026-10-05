@@ -208,6 +208,16 @@ A prompt can also be handled without starting a run. Then no start arrives, and 
 that waits for a settle waits for ever. Report what the runtime emits and nothing else: no
 start, no record.
 
+**A replaced pod ends the run it was serving.** A root run's identity is its pod's UID, so a
+replaced pod is a different run, and the run before it can never be ended by the bridge that
+knew it: that bridge is gone. The broker reports it as failed, because the broker is the only
+component that can see a pod go.
+
+Without that rule the run stays `waiting` for ever. That is a permanent lie in the log, and it
+becomes a false alarm the moment anything notifies on it: the record says an agent is waiting
+for a person when the agent no longer exists. A replaced pod is ordinary — an upgrade, a crash,
+a moved image — so the runs would accumulate one per restart.
+
 The control plane derives `previous_state` from the run it holds, so two reporters cannot
 corrupt the record. That property is what lets the bridge and the broker both write to one
 run without an extra protocol.
