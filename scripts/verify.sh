@@ -25,7 +25,7 @@
 #
 # Tools and the versions this was derived with:
 #
-#   go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+#   go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 #   go install golang.org/x/tools/cmd/deadcode@latest
 #   go install golang.org/x/vuln/cmd/govulncheck@latest
 #   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
@@ -90,7 +90,7 @@ require() {
 
 step "tool versions"
 require go "$(go version 2>&1)" "go1.27" || true
-require staticcheck "$(staticcheck -version 2>&1)" "2026.2.1" || true
+require staticcheck "$(staticcheck -version 2>&1)" "2026.2.2" || true
 require golangci-lint "$(golangci-lint --version 2>&1)" "2.14.0" || true
 require govulncheck "$(govulncheck -version 2>&1 | head -1)" "go1.27" || true
 require gitleaks "$(gitleaks version 2>&1)" "8.30.1" || true
