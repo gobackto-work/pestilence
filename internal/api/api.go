@@ -15,6 +15,7 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/eventlog"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -50,6 +52,40 @@ type Config struct {
 
 	// HostnameSuffix is appended to the slug, e.g. "gobackto.work".
 	HostnameSuffix string
+
+	// Events records a state transition that a workspace's runtime reports, and serves the
+	// events an owner has not taken. Required for the ingest and read endpoints.
+	Events EventRecord
+
+	// TokenKeys resolves the public key that signs one workspace's capability token,
+	// by slug. Required for the ingest endpoint.
+	TokenKeys TokenKeySource
+}
+
+// EventRecord is the durable record of run events. eventlog.Log satisfies it.
+//
+// An interface and not the concrete type so that this package does not depend on where the
+// record is stored, and so that a test can refuse a write deliberately.
+type EventRecord interface {
+	Append(ctx context.Context, r eventlog.Report) (eventlog.AppendResult, error)
+	// EnsurePull opens the read subscription for a principal, creating it once.
+	EnsurePull(ctx context.Context, principalID string) (eventlog.Subscription, error)
+	// Outstanding returns the events a subscription has not taken, and the subscription's
+	// cursor.
+	Outstanding(ctx context.Context, subscriptionID string, limit int) (eventlog.Subscription, []eventlog.Event, error)
+	// AdvanceCursor records what a subscriber has taken.
+	AdvanceCursor(ctx context.Context, id string, to int64) error
+	// Runs returns an owner's runs, most recently changed first. This is the log and not
+	// the queue: it takes no cursor and acknowledges nothing.
+	Runs(ctx context.Context, ownerID string, limit int) ([]eventlog.Run, error)
+}
+
+// TokenKeySource resolves the public key that signs one workspace's capability token.
+//
+// The key is per workspace. The control plane minted it, so an implementation reads it
+// back from the control plane's own Secret and never from a tenant namespace.
+type TokenKeySource interface {
+	PublicKey(ctx context.Context, slug string) (ed25519.PublicKey, error)
 }
 
 // Server is the control plane's HTTP handler.
@@ -75,6 +111,9 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	if cfg.Verifier == nil {
 		panic("api.New: Config.Verifier is required")
 	}
+	if cfg.Events == nil || cfg.TokenKeys == nil {
+		panic("api.New: Config.Events and Config.TokenKeys are required by the ingest endpoint")
+	}
 	srv := &Server{store: s, cfg: cfg, log: log, mux: http.NewServeMux()}
 
 	// Unauthenticated, and not only for probes: town's readiness check calls this,
@@ -90,6 +129,24 @@ func New(s store.Store, cfg Config, log *slog.Logger) *Server {
 	// The ForwardAuth decision for tenant endpoints. Traefik asks town, town asks
 	// this, and this holds the ownership rule because it holds the records.
 	srv.mux.HandleFunc("POST /api/authorize", srv.requireOwner(srv.handleAuthorize))
+
+	// A workspace's runtime reports that one of its runs changed state.
+	//
+	// The route names no workspace. The token does, and the workspace owns the key that
+	// proves the token, so the claim selects a key and the key is what makes the claim
+	// true. The caller therefore has nothing to spoof: it cannot report as a workspace
+	// other than the one its token was minted for.
+	srv.mux.HandleFunc("POST /api/events", srv.requireReporter(srv.handleAppendEvent))
+
+	// The read side. These are owner-scoped like every other route a user calls: the owner
+	// comes from the assertion, and a subscription takes the events of one principal and no
+	// others, so there is nothing here that can read another user's runs.
+	srv.mux.HandleFunc("GET /api/events", srv.requireOwner(srv.handleEvents))
+	srv.mux.HandleFunc("POST /api/events/ack", srv.requireOwner(srv.handleAckEvents))
+
+	// The log, for a reader that wants to show what has happened. It takes no cursor, so it
+	// consumes nothing and blocks nothing.
+	srv.mux.HandleFunc("GET /api/runs", srv.requireOwner(srv.handleRuns))
 
 	return srv
 }

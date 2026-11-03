@@ -19,9 +19,9 @@ func materialSpec() Spec {
 // does not read as "not valid yet" or "expired" depending on when the test runs.
 func verifyAt(t *testing.T, token string, pub ed25519.PublicKey, at time.Time) jwt.MapClaims {
 	t.Helper()
-	claims, err := VerifyToken(token, pub, jwt.WithTimeFunc(func() time.Time { return at }))
+	claims, err := verifyTokenClaims(token, pub, jwt.WithTimeFunc(func() time.Time { return at }))
 	if err != nil {
-		t.Fatalf("VerifyToken: %v", err)
+		t.Fatalf("verifyTokenClaims: %v", err)
 	}
 	return claims
 }
@@ -44,7 +44,6 @@ func TestMintedTokenCarriesThePinnedClaims(t *testing.T) {
 	want := map[string]string{
 		"iss":       TokenIssuer,
 		"sub":       "pi-root@" + Namespace(slug),
-		"aud":       spec.Normalized().BrokerServiceName(),
 		"workspace": slug,
 		"namespace": Namespace(slug),
 		"role":      TokenRoleRoot,
@@ -53,6 +52,23 @@ func TestMintedTokenCarriesThePinnedClaims(t *testing.T) {
 		if got, _ := claims[k].(string); got != v {
 			t.Errorf("claim %q = %q, want %q", k, got, v)
 		}
+	}
+
+	// The audience is a set and not a string, because the token is accepted at the
+	// broker and at the control plane's own ingest endpoint. The broker checks
+	// membership (jwt.WithAudience), so membership is what is pinned here. This claim is
+	// read by the broker in the other repository, and the shape changed when the second
+	// audience was added.
+	broker := spec.Normalized().BrokerServiceName()
+	named := false
+	for _, aud := range audiences(t, claims) {
+		if aud == broker {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("the token does not name the broker %q, so it would refuse it. audiences: %v",
+			broker, audiences(t, claims))
 	}
 	if claims["jti"] == "" || claims["jti"] == nil {
 		t.Error("jti must be set")
@@ -114,7 +130,7 @@ func TestTokenDoesNotVerifyWithAnotherWorkspacesKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParsePublicKey: %v", err)
 	}
-	if _, err := VerifyToken(a.Token, pubB, jwt.WithTimeFunc(func() time.Time { return now })); err == nil {
+	if _, err := verifyTokenClaims(a.Token, pubB, jwt.WithTimeFunc(func() time.Time { return now })); err == nil {
 		t.Error("a token verified against a different workspace's public key")
 	}
 }
