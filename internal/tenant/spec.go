@@ -256,6 +256,13 @@ func (s Spec) TokenKeySecretName() string { return s.Slug + "-token-key" }
 // the private key never leaves the control plane.
 func (s Spec) TokenPubkeyConfigMapName() string { return s.BrokerServiceName() + "-token-pubkey" }
 
+// ReportTokenSecretName is the Secret the broker reads its reporting token from.
+//
+// It lives in Spec.PlatformNamespace, beside the broker, because a Secret volume is
+// namespace-local: the broker cannot mount the copy the root agent holds in the tenant
+// namespace, and it must not hold that copy anyway.
+func (s Spec) ReportTokenSecretName() string { return s.BrokerServiceName() + "-report-token" }
+
 // Normalized applies defaults so callers can construct a Spec with only Slug
 // set. It is exported because the provisioner needs the effective platform
 // namespace, which is empty until defaulted.

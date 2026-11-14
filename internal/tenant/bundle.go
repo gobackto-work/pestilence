@@ -160,11 +160,7 @@ func BundleClassified(spec Spec) ([]Classified, error) {
 
 	if s.BrokerImage != "" {
 		objs = append(objs, Classified{ClassPlatform, s.brokerDeployment()})
-		// Emitted UNCONDITIONALLY, like the token key Secret and for the same reason:
-		// DeletePlan rebuilds the spec from the stored record, which carries no
-		// material, so an object gated on material would be absent from the plan and
-		// the broker's private key would survive teardown unnoticed.
-		objs = append(objs, Classified{ClassPlatform, s.brokerTLSSecret()})
+		objs = append(objs, s.brokerPlatformCredentials()...)
 		// The agent's copy of the certificate, in the TENANT namespace, because a Secret
 		// volume reference is namespace-local and the agent cannot reach the platform
 		// one. Emitted unconditionally for the same delete-plan reason.
@@ -200,6 +196,20 @@ func BundleClassified(spec Spec) ([]Classified, error) {
 
 	annotate(objs)
 	return objs, nil
+}
+
+// brokerPlatformCredentials returns the credentials that sit beside the broker in the
+// platform namespace.
+//
+// Emitted UNCONDITIONALLY, including when the bundle is rendered for a delete plan.
+// DeletePlan rebuilds the spec from the stored record, which carries no material, so an
+// object gated on material would be absent from the plan and the credential would survive
+// teardown unnoticed.
+func (s Spec) brokerPlatformCredentials() []Classified {
+	return []Classified{
+		{ClassPlatform, s.brokerTLSSecret()},
+		{ClassPlatform, s.reportTokenSecret()},
+	}
 }
 
 // annotate stamps the reconciliation class onto each object.

@@ -17,13 +17,25 @@ import (
 // broker pins EdDSA via WithValidMethods, which is what closes the HS256/"none"
 // confusion attacks.
 const (
-	TokenIssuer   = "pestilence"
+	TokenIssuer = "pestilence"
+
+	// TokenRoleRoot is the root agent. Only this role may orchestrate, so the broker
+	// accepts it and nothing else.
 	TokenRoleRoot = "root-agent"
 
-	// Data keys used by the three objects that carry token material.
+	// TokenRoleBroker is the broker, which reports run state and does nothing else.
+	//
+	// It is a separate role and a separate token, because the broker is a separate
+	// principal: it runs in the platform namespace holding a Role into the tenant
+	// namespace, so it must not hold the credential of the agent it supervises. One
+	// shared token would make a compromise of either a compromise of both.
+	TokenRoleBroker = "broker"
+
+	// Data keys used by the objects that carry token material.
 	TokenPrivateKeyKey = "ed25519.pem"
 	TokenPublicKeyKey  = "ed25519.pub"
 	TokenDataKey       = "token"
+	TokenReportKey     = "report-token"
 
 	// DefaultTokenTTL bounds the capability token.
 	//
@@ -82,6 +94,7 @@ type SigningMaterial struct {
 	PrivateKeyPEM string
 	PublicKeyPEM  string
 	Token         string
+	ReportToken   string
 	TLSCertPEM    string
 	TLSKeyPEM     string
 }
@@ -114,6 +127,10 @@ func NewSigningMaterial(spec Spec, now time.Time) (SigningMaterial, error) {
 	if err != nil {
 		return SigningMaterial{}, err
 	}
+	reportToken, err := MintReportToken(spec, priv, now)
+	if err != nil {
+		return SigningMaterial{}, err
+	}
 	tlsMaterial, err := NewBrokerTLS(spec, now)
 	if err != nil {
 		return SigningMaterial{}, err
@@ -122,10 +139,20 @@ func NewSigningMaterial(spec Spec, now time.Time) (SigningMaterial, error) {
 		PrivateKeyPEM: privPEM,
 		PublicKeyPEM:  pubPEM,
 		Token:         token,
+		ReportToken:   reportToken,
 		TLSCertPEM:    tlsMaterial.CertPEM,
 		TLSKeyPEM:     tlsMaterial.KeyPEM,
 	}, nil
 }
+
+// TokenAudienceIngest is the audience that the event-record ingest endpoint requires.
+//
+// It is an extra audience on the same token and not a second token. The root agent
+// holds the token and the root agent is the reporter, so a second token would be held
+// by the same process and would separate nothing. What this does buy is the rule that
+// a token minted for one service is refused at another, which matters as soon as a
+// second service mints tokens.
+const TokenAudienceIngest = "pestilence-ingest"
 
 // MintToken issues the workspace capability token with the claims pinned in §6.2.
 func MintToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error) {
@@ -151,6 +178,43 @@ func MintToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error
 		"workspace": s.Slug,
 		"namespace": s.Namespace(),
 		"role":      TokenRoleRoot,
+		"iat":       now.Unix(),
+		"nbf":       now.Unix(),
+		"exp":       now.Add(ttl).Unix(),
+		"jti":       jti,
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(priv)
+}
+
+// MintReportToken issues the token the broker reports run state with.
+//
+// It is narrower than the capability token in both directions, which is the point of it
+// being a second token rather than a second audience on the first. Its audience names this
+// control plane and nothing else, so the broker refuses it; and its role is the reporting
+// role, so this control plane refuses it for anything but a report.
+func MintReportToken(spec Spec, priv ed25519.PrivateKey, now time.Time) (string, error) {
+	s := spec.Normalized()
+	if err := ValidateSlug(s.Slug); err != nil {
+		return "", err
+	}
+	if len(priv) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("signing key is %d bytes, want %d", len(priv), ed25519.PrivateKeySize)
+	}
+	ttl := s.TokenTTL
+	if ttl <= 0 {
+		ttl = DefaultTokenTTL
+	}
+	jti, err := randomID(16)
+	if err != nil {
+		return "", err
+	}
+	claims := jwt.MapClaims{
+		"iss":       TokenIssuer,
+		"sub":       "pi-broker@" + s.Namespace(),
+		"aud":       TokenAudienceIngest,
+		"workspace": s.Slug,
+		"namespace": s.Namespace(),
+		"role":      TokenRoleBroker,
 		"iat":       now.Unix(),
 		"nbf":       now.Unix(),
 		"exp":       now.Add(ttl).Unix(),
@@ -201,6 +265,84 @@ func randomID(nBytes int) (string, error) {
 		return "", fmt.Errorf("read random bytes: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// Claims are the workspace capability-token claims.
+type Claims struct {
+	Workspace string `json:"workspace"`
+	Namespace string `json:"namespace"`
+	Role      string `json:"role"`
+
+	jwt.RegisteredClaims
+}
+
+// VerifyToken checks a workspace capability token and returns its claims.
+//
+// The caller supplies the public key of the workspace it expects, because the key is per
+// workspace and this package holds none of its own. The workspace and the namespace are
+// checked against the caller's expectations, so a token minted for one workspace is not
+// accepted for another.
+//
+// Every rejection returns the same shape of error. The caller collapses them into one
+// response, so a probing client learns nothing about which check failed.
+func VerifyToken(raw string, pub ed25519.PublicKey, audience, workspace, namespace, role string, now time.Time) (Claims, error) {
+	var claims Claims
+	if len(pub) != ed25519.PublicKeySize {
+		return Claims{}, fmt.Errorf("verification key is %d bytes, want %d", len(pub), ed25519.PublicKeySize)
+	}
+	if _, err := jwt.ParseWithClaims(raw, &claims,
+		func(*jwt.Token) (any, error) { return pub, nil },
+		// Pinned, for the same reason the broker pins it: a parser that accepts the
+		// algorithm the token claims accepts an HMAC forged with the public key.
+		jwt.WithValidMethods([]string{"EdDSA"}),
+		jwt.WithIssuer(TokenIssuer),
+		// An audience is a set. The token is accepted wherever it names.
+		jwt.WithAudience(audience),
+		// A token with no expiry would be valid for ever.
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(func() time.Time { return now }),
+	); err != nil {
+		return Claims{}, fmt.Errorf("token: %w", err)
+	}
+	if claims.Workspace != workspace {
+		return Claims{}, fmt.Errorf("token: workspace %q is not %q", claims.Workspace, workspace)
+	}
+	if claims.Namespace != namespace {
+		return Claims{}, fmt.Errorf("token: namespace %q is not %q", claims.Namespace, namespace)
+	}
+	if claims.Role != role {
+		return Claims{}, fmt.Errorf("token: role %q is not %q", claims.Role, role)
+	}
+	return claims, nil
+}
+
+// TokenWorkspace returns the workspace claim of a token that has NOT been verified.
+//
+// It exists so the reporting endpoint can find the key it needs to verify a token WITH.
+// The token names its workspace, the workspace owns the key, and the key is what proves
+// the claim. That is the ordinary `kid` pattern.
+//
+// The value it returns is a LOOKUP KEY and never an authorisation. VerifyToken re-checks
+// the claim against the workspace whose key was used, so a token naming a workspace it was
+// not minted for selects a key that cannot verify its signature, and is refused. A shared
+// key would not help either, because the claim is compared as well.
+//
+// Do not use this for a decision. It reads bytes a caller chose.
+func TokenWorkspace(raw string) (string, error) {
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, claims); err != nil {
+		return "", fmt.Errorf("token: %w", err)
+	}
+	slug, _ := claims["workspace"].(string)
+	if slug == "" {
+		return "", fmt.Errorf("token: no workspace claim")
+	}
+	// Validated before it reaches a lookup, so a caller cannot make the control plane
+	// query for a value that is not a workspace name at all.
+	if err := ValidateSlug(slug); err != nil {
+		return "", fmt.Errorf("token: %w", err)
+	}
+	return slug, nil
 }
 
 // TokenRotationDivisor sets how much of the TTL must remain for a token to count as
