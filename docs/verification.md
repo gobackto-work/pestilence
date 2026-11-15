@@ -18,6 +18,25 @@ verified: 11 checks, 0 failures
 Mirrors `scarab/scripts/verify.sh` deliberately: the same design rules and the same
 lint thresholds, so "verified" means the same thing on both sides of the contract.
 
+## Cross-repository contract test
+
+Check out the versions of `scarab` and `town` that you want to test.
+Install Go and Node.js. Run this command from the `pestilence` repository:
+
+```sh
+PLATFORM_CONTRACT_SCARAB_DIR=/path/to/scarab \
+PLATFORM_CONTRACT_TOWN_DIR=/path/to/town \
+  go test ./internal/api -run '^TestPlatformContract$' -count=1 -v
+```
+
+Use absolute paths that the Go process can read. On Windows, use native Windows paths.
+The test starts a local control plane with temporary keys and databases.
+The `scarab` reporter posts run states to that control plane.
+The `town` client reads the run through the control plane API.
+The test also checks duplicate reports, invalid tokens, unknown states, and owner isolation.
+It does not test the browser, Kubernetes, network policies, or deployed versions.
+The normal test suites skip this test when both paths are absent.
+
 ## The four design rules
 
 1. **Stateless.** Every check re-reads the tree. Nothing in the gate is an editor,
