@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -37,7 +36,7 @@ const columns = `id, slug, owner_id, namespace, hostname, state,
                   cpu, memory, storage, max_pods`
 
 // SQL is the PostgreSQL workspace store.
-type SQL struct{ db *sqlbackend.DB }
+type SQL struct{ db *sql.DB }
 
 // Close implements Store.
 func (s *SQL) Close() error { return s.db.Close() }
@@ -50,7 +49,7 @@ func (s *SQL) Create(ctx context.Context, w workspace.Workspace) error {
 	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO workspaces (`+columns+`)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		w.ID, w.Slug, w.OwnerID, w.Namespace, w.Hostname, string(w.State),
 		formatTime(w.CreatedAt), formatTime(w.LastActiveAt), nullableTime(w.DeletedAt), w.LastError,
 		w.Limits.CPU, w.Limits.Memory, w.Limits.Storage, w.Limits.MaxPods,
@@ -67,7 +66,7 @@ func (s *SQL) Create(ctx context.Context, w workspace.Workspace) error {
 
 // Get implements Store.
 func (s *SQL) Get(ctx context.Context, id string) (workspace.Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE id = $1`, id)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspace.Workspace{}, ErrNotFound
@@ -80,7 +79,7 @@ func (s *SQL) Get(ctx context.Context, id string) (workspace.Workspace, error) {
 
 // GetBySlug implements Store.
 func (s *SQL) GetBySlug(ctx context.Context, slug string) (workspace.Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE slug = ?`, slug)
+	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE slug = $1`, slug)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspace.Workspace{}, ErrNotFound
@@ -124,8 +123,8 @@ func (s *SQL) UpdateState(ctx context.Context, id string, from, to workspace.Sta
 		stamp = formatTime(time.Now().UTC())
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE workspaces SET state = ?, deleted_at = COALESCE(?, deleted_at)
-         WHERE id = ? AND state = ?`,
+		`UPDATE workspaces SET state = $1, deleted_at = COALESCE($2, deleted_at)
+         WHERE id = $3 AND state = $4`,
 		string(to), stamp, id, string(from))
 	if err != nil {
 		return fmt.Errorf("update state for %s: %w", id, err)
@@ -152,7 +151,7 @@ func (s *SQL) UpdateState(ctx context.Context, id string, from, to workspace.Sta
 // It is deliberately separate from UpdateState: a failure reason is diagnostic,
 // and recording it must not change lifecycle state.
 func (s *SQL) SetError(ctx context.Context, id, message string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_error = ? WHERE id = ?`, message, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_error = $1 WHERE id = $2`, message, id)
 	if err != nil {
 		return fmt.Errorf("set error for %s: %w", id, err)
 	}
@@ -168,7 +167,7 @@ func (s *SQL) SetError(ctx context.Context, id, message string) error {
 
 // Touch implements Store.
 func (s *SQL) Touch(ctx context.Context, id string, at time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ? WHERE id = ?`,
+	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = $1 WHERE id = $2`,
 		formatTime(at), id)
 	if err != nil {
 		return fmt.Errorf("touch %s: %w", id, err)

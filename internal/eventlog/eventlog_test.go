@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
+	"github.com/gobackto-work/pestilence/internal/testutil"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -278,7 +278,7 @@ func TestDeletingAWorkspaceRemovesItsRunsAndEvents(t *testing.T) {
 	// The run summary has no getter any more, so this counts the rows directly. It still
 	// matters: a summary left behind is tenant data that outlives its workspace.
 	var runs int
-	if err := f.log.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE workspace_id = ?`, f.workspaceID).Scan(&runs); err != nil {
+	if err := f.log.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE workspace_id = $1`, f.workspaceID).Scan(&runs); err != nil {
 		t.Fatalf("count runs: %v", err)
 	}
 	if runs != 0 {

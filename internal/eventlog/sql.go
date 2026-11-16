@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -77,7 +76,7 @@ var schema = []string{
 
 // Log is the durable PostgreSQL run record.
 type Log struct {
-	db *sqlbackend.DB
+	db *sql.DB
 
 	// maxEvents and maxAge are the retention limits. They are fields and not only
 	// constants so that a test can lower them: the count limit is 1700, and a test that
@@ -86,7 +85,7 @@ type Log struct {
 	maxAge    time.Duration
 }
 
-// Close releases the file.
+// Close releases the database pool.
 func (l *Log) Close() error { return l.db.Close() }
 
 // Append records the state that a runtime reported for a run.
@@ -153,9 +152,9 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 }
 
 // existingEvent returns the sequence of the event that holds this idempotency key.
-func existingEvent(ctx context.Context, tx *sqlbackend.Tx, id string) (int64, bool, error) {
+func existingEvent(ctx context.Context, tx *sql.Tx, id string) (int64, bool, error) {
 	var sequence int64
-	err := tx.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_id = ?`, id).Scan(&sequence)
+	err := tx.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_id = $1`, id).Scan(&sequence)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, false, nil
@@ -167,13 +166,13 @@ func existingEvent(ctx context.Context, tx *sqlbackend.Tx, id string) (int64, bo
 
 // recordedState returns the state the record holds for a run, the mode it was recorded
 // with, and the sequence that set the state. A run the record has not seen has neither.
-func recordedState(ctx context.Context, tx *sqlbackend.Tx, runID string) (State, Mode, int64, error) {
+func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, int64, error) {
 	var (
 		state    string
 		mode     string
 		sequence int64
 	)
-	err := tx.QueryRowContext(ctx, `SELECT state, mode, last_sequence FROM runs WHERE id = ?`, runID).
+	err := tx.QueryRowContext(ctx, `SELECT state, mode, last_sequence FROM runs WHERE id = $1`, runID).
 		Scan(&state, &mode, &sequence)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -185,12 +184,12 @@ func recordedState(ctx context.Context, tx *sqlbackend.Tx, runID string) (State,
 }
 
 // insertEvent writes one event and returns its sequence.
-func insertEvent(ctx context.Context, tx *sqlbackend.Tx, r Report, kind Kind, from State, at time.Time, attributes string) (int64, error) {
+func insertEvent(ctx context.Context, tx *sql.Tx, r Report, kind Kind, from State, at time.Time, attributes string) (int64, error) {
 	var sequence int64
 	err := tx.QueryRowContext(ctx, `
         INSERT INTO events (event_id, run_id, workspace_id, owner_id, kind,
                             previous_state, state, occurred_at, recorded_at, attributes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING sequence`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING sequence`,
 		r.ID, r.RunID, r.WorkspaceID, r.OwnerID, string(kind),
 		string(from), string(r.State), millis(r.OccurredAt), millis(at), attributes).Scan(&sequence)
 	if err != nil {
@@ -201,7 +200,7 @@ func insertEvent(ctx context.Context, tx *sqlbackend.Tx, r Report, kind Kind, fr
 
 // upsertRun writes the summary in the same transaction as the event, so that the two can
 // never disagree. started_at keeps its first value and ended_at is stamped once.
-func upsertRun(ctx context.Context, tx *sqlbackend.Tx, r Report, at time.Time, sequence int64) error {
+func upsertRun(ctx context.Context, tx *sql.Tx, r Report, at time.Time, sequence int64) error {
 	var ended any
 	if r.State.Terminal() {
 		ended = millis(at)
@@ -209,7 +208,7 @@ func upsertRun(ctx context.Context, tx *sqlbackend.Tx, r Report, at time.Time, s
 	_, err := tx.ExecContext(ctx, `
         INSERT INTO runs (id, workspace_id, owner_id, state, mode,
                           started_at, updated_at, ended_at, last_sequence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT(id) DO UPDATE SET
             state         = excluded.state,
             updated_at    = excluded.updated_at,
@@ -235,7 +234,7 @@ func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int)
 	}
 
 	rows, err := l.db.QueryContext(ctx, selectEvents+`
-        WHERE sequence > ? AND owner_id = ? ORDER BY sequence LIMIT ?`,
+        WHERE sequence > $1 AND owner_id = $2 ORDER BY sequence LIMIT $3`,
 		s.Cursor, s.PrincipalID, limit)
 	if err != nil {
 		return Subscription{}, nil, fmt.Errorf("read outstanding for %s: %w", subscriptionID, err)
@@ -261,7 +260,7 @@ func (l *Log) Runs(ctx context.Context, ownerID string, limit int) ([]Run, error
 	rows, err := l.db.QueryContext(ctx, `
         SELECT id, workspace_id, owner_id, state, mode,
                started_at, updated_at, ended_at, last_sequence
-        FROM runs WHERE owner_id = ? ORDER BY last_sequence DESC LIMIT ?`, ownerID, limit)
+        FROM runs WHERE owner_id = $1 ORDER BY last_sequence DESC LIMIT $2`, ownerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read runs for %s: %w", ownerID, err)
 	}
@@ -315,14 +314,14 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
         INSERT INTO subscriptions (id, principal_id, cursor)
-        VALUES (?, ?, 0)
+        VALUES ($1, $2, 0)
         ON CONFLICT DO NOTHING`,
 		ulid.Make().String(), principalID); err != nil {
 		return Subscription{}, fmt.Errorf("create the pull subscription for %s: %w", principalID, err)
 	}
 
 	row := tx.QueryRowContext(ctx, selectSubscriptions+`
-        WHERE principal_id = ?`, principalID)
+        WHERE principal_id = $1`, principalID)
 	sub, err := scanSubscription(row)
 	if err != nil {
 		return Subscription{}, err
@@ -335,7 +334,7 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 
 // Subscription returns one subscription.
 func (l *Log) Subscription(ctx context.Context, id string) (Subscription, error) {
-	return scanSubscription(l.db.QueryRowContext(ctx, selectSubscriptions+` WHERE id = ?`, id))
+	return scanSubscription(l.db.QueryRowContext(ctx, selectSubscriptions+` WHERE id = $1`, id))
 }
 
 // AdvanceCursor records what a subscription has taken.
@@ -347,7 +346,7 @@ func (l *Log) AdvanceCursor(ctx context.Context, id string, to int64) error {
 		return err
 	}
 	if _, err := l.db.ExecContext(ctx,
-		`UPDATE subscriptions SET cursor = ? WHERE id = ? AND cursor < ?`, to, id, to); err != nil {
+		`UPDATE subscriptions SET cursor = $1 WHERE id = $2 AND cursor < $3`, to, id, to); err != nil {
 		return fmt.Errorf("advance cursor for %s: %w", id, err)
 	}
 	return nil
@@ -394,7 +393,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	var out PruneResult
 
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM events WHERE recorded_at < ? AND sequence <= ?`,
+		`DELETE FROM events WHERE recorded_at < $1 AND sequence <= $2`,
 		millis(now.Add(-l.maxAge)), bound)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("prune by age: %w", err)
@@ -405,13 +404,13 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	// limit is kept, so everything below it goes.
 	var threshold sql.NullInt64
 	err = tx.QueryRowContext(ctx,
-		`SELECT sequence FROM events WHERE sequence <= ? ORDER BY sequence DESC LIMIT 1 OFFSET ?`,
+		`SELECT sequence FROM events WHERE sequence <= $1 ORDER BY sequence DESC LIMIT 1 OFFSET $2`,
 		bound, l.maxEvents-1).Scan(&threshold)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return PruneResult{}, fmt.Errorf("size threshold: %w", err)
 	}
 	if threshold.Valid {
-		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE sequence < ?`, threshold.Int64)
+		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE sequence < $1`, threshold.Int64)
 		if err != nil {
 			return PruneResult{}, fmt.Errorf("prune by count: %w", err)
 		}
@@ -419,7 +418,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	}
 
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM events WHERE sequence > ?`, bound).Scan(&out.Held); err != nil {
+		`SELECT COUNT(*) FROM events WHERE sequence > $1`, bound).Scan(&out.Held); err != nil {
 		return PruneResult{}, fmt.Errorf("count held: %w", err)
 	}
 
@@ -441,8 +440,8 @@ func (l *Log) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 	defer func() { _ = tx.Rollback() }()
 
 	for _, stmt := range []string{
-		`DELETE FROM events WHERE workspace_id = ?`,
-		`DELETE FROM runs WHERE workspace_id = ?`,
+		`DELETE FROM events WHERE workspace_id = $1`,
+		`DELETE FROM runs WHERE workspace_id = $1`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt, workspaceID); err != nil {
 			return fmt.Errorf("delete workspace %s rows: %w", workspaceID, err)

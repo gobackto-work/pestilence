@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gobackto-work/pestilence/internal/sqlbackend"
+	_ "github.com/jackc/pgx/v5/stdlib" // Register the PostgreSQL driver.
 )
 
 // OpenPostgres opens the run record in a dedicated PostgreSQL database.
@@ -29,12 +29,12 @@ func OpenPostgres(dsn string) (*Log, error) {
 			return nil, fmt.Errorf("apply postgres event schema: %w", err)
 		}
 	}
-	return &Log{db: sqlbackend.Wrap(db), maxEvents: retentionCount, maxAge: retentionAge}, nil
+	return &Log{db: db, maxEvents: retentionCount, maxAge: retentionAge}, nil
 }
 
 // beginWrite serialises PostgreSQL event writers until commit. Sequence allocation alone
 // does not order commits, and a cursor must not pass an event that is still uncommitted.
-func (l *Log) beginWrite(ctx context.Context) (*sqlbackend.Tx, error) {
+func (l *Log) beginWrite(ctx context.Context) (*sql.Tx, error) {
 	tx, err := l.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

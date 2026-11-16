@@ -123,7 +123,7 @@ deadcode_production() {
 		printf '%s\n' "$output"
 		return 1
 	fi
-	printf '%s\n' "$output" | tr '\134' '/' | awk 'NF && index($0, "internal/sqlbackend/testutil/") == 0'
+	printf '%s\n' "$output" | tr '\134' '/' | awk 'NF && index($0, "internal/testutil/") == 0'
 }
 
 step "go: format, vet, lint, dead code"

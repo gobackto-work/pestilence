@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gobackto-work/pestilence/internal/sqlbackend"
+	_ "github.com/jackc/pgx/v5/stdlib" // Register the PostgreSQL driver.
 )
 
 // OpenPostgres opens a dedicated PostgreSQL database for the workspace store.
@@ -29,5 +29,5 @@ func OpenPostgres(dsn string) (*SQL, error) {
 			return nil, fmt.Errorf("apply postgres workspace schema: %w", err)
 		}
 	}
-	return &SQL{db: sqlbackend.Wrap(db)}, nil
+	return &SQL{db: db}, nil
 }

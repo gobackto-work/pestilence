@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gobackto-work/pestilence/internal/eventlog"
-	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
+	"github.com/gobackto-work/pestilence/internal/testutil"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 	"github.com/oklog/ulid/v2"
 )
