@@ -10,7 +10,7 @@ import (
 
 func openPostgresStores(dsn string) (*store.SQL, *eventlog.Log, func(), error) {
 	if dsn == "" {
-		return nil, nil, nil, errors.New("PESTILENCE_POSTGRES_URL is required for the postgres backend")
+		return nil, nil, nil, errors.New("PESTILENCE_POSTGRES_URL is required")
 	}
 	workspaces, err := store.OpenPostgres(dsn)
 	if err != nil {

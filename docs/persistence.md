@@ -9,19 +9,12 @@ The event store serialises writes until each transaction commits.
 A subscription cursor must not pass an uncommitted lower sequence.
 The event and run summary must commit in the same transaction.
 
-## Migrate the legacy databases
+## Legacy databases
 
-Stop all writers before migration. Preserve both SQLite files for rollback.
-Supply an empty PostgreSQL database and `PESTILENCE_POSTGRES_URL`.
-Run the migration tool against the offline files:
-
-```sh
-migrate-sqlite-postgres -offline-confirmed \
-  -workspace-db=/path/to/pestilence.db -event-db=/path/to/events.db
-```
-
-The tool refuses a non-empty target. The tool preserves event sequences and cursors.
-The tool imports all records in one PostgreSQL transaction.
+The `v1.2.0` source includes the one-time SQLite migration command.
+Copy the offline files to a writable directory before migration.
+Keep the legacy files until the rollback period ends.
+The legacy files do not include changes made after migration.
 
 ## Verification
 
