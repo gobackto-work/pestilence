@@ -16,6 +16,7 @@ import (
 	"github.com/gobackto-work/pestilence/internal/eventlog"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
+	"github.com/gobackto-work/pestilence/internal/testutil"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 	"github.com/oklog/ulid/v2"
 )
@@ -50,7 +51,7 @@ func newIngestFixture(t *testing.T) ingestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	st, err := store.OpenSQLite(t.TempDir() + "/w.db")
+	st, err := store.OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

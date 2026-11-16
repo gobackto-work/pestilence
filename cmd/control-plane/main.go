@@ -34,8 +34,6 @@ import (
 func main() {
 	var (
 		addr        = flag.String("addr", ":8080", "HTTP listen address")
-		dbPath      = flag.String("db", "/var/lib/pestilence/pestilence.db", "SQLite database path")
-		eventPath   = flag.String("event-db", "/var/lib/pestilence/events.db", "SQLite event record path")
 		kubeconfig  = flag.String("kubeconfig", "", "kubeconfig path; empty uses in-cluster config")
 		brokerImage = flag.String("broker-image", os.Getenv("PESTILENCE_BROKER_IMAGE"), "broker image ref")
 		agentImage  = flag.String("agent-image", os.Getenv("PESTILENCE_AGENT_IMAGE"), "agent image ref")
@@ -54,8 +52,7 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(opts{
 		addr:            *addr,
-		dbPath:          *dbPath,
-		eventPath:       *eventPath,
+		postgresURL:     os.Getenv("PESTILENCE_POSTGRES_URL"),
 		kubeconfig:      *kubeconfig,
 		brokerImage:     *brokerImage,
 		agentImage:      *agentImage,
@@ -76,8 +73,7 @@ func main() {
 
 type opts struct {
 	addr            string
-	dbPath          string
-	eventPath       string
+	postgresURL     string
 	kubeconfig      string
 	brokerImage     string
 	agentImage      string
@@ -90,25 +86,6 @@ type opts struct {
 	tokenTTL        time.Duration
 	brokerTLS       bool
 	deletionTimeout time.Duration
-}
-
-// openStores opens the registry and the event record, and returns a function that closes
-// both.
-//
-// They are separate files on purpose. The registry is read-mostly and holds a row per
-// workspace; the record is append-heavy and holds a row per transition. One file with one
-// writer would make them contend for one lock.
-func openStores(o opts) (*store.SQLite, *eventlog.Log, func(), error) {
-	st, err := store.OpenSQLite(o.dbPath)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("open store: %w", err)
-	}
-	events, err := eventlog.Open(o.eventPath)
-	if err != nil {
-		_ = st.Close()
-		return nil, nil, nil, fmt.Errorf("open event record: %w", err)
-	}
-	return st, events, func() { _ = events.Close(); _ = st.Close() }, nil
 }
 
 // startBackground stops the process on a signal, and starts the record's pruning.
@@ -159,7 +136,7 @@ func pruneEvents(ctx context.Context, log *eventlog.Log, logger *slog.Logger) {
 //
 // A function rather than a literal inside run, because the config has grown to the point
 // where it is most of what run does.
-func newAPI(o opts, st *store.SQLite, events *eventlog.Log, prov *provisioner.Reconciler,
+func newAPI(o opts, st store.Store, events *eventlog.Log, prov *provisioner.Reconciler,
 	verifier *auth.Verifier, log *slog.Logger) *api.Server {
 	return api.New(st, api.Config{
 		Verifier:       verifier,
@@ -201,7 +178,7 @@ func run(o opts, log *slog.Logger) error {
 		return fmt.Errorf("kubernetes client: %w", err)
 	}
 
-	st, events, closeStores, err := openStores(o)
+	st, events, closeStores, err := openPostgresStores(o.postgresURL)
 	if err != nil {
 		return err
 	}
@@ -239,7 +216,7 @@ func run(o opts, log *slog.Logger) error {
 	go func() { errCh <- ctrl.Run(ctx) }()
 	go serveHTTP(ctx, o.addr, srv, errCh)
 
-	log.Info("control plane started", "addr", o.addr, "db", o.dbPath, "interval", o.interval.String())
+	log.Info("control plane started", "addr", o.addr, "store", "postgres", "interval", o.interval.String())
 
 	first := <-errCh
 	stop()

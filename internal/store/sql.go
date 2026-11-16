@@ -8,10 +8,7 @@ import (
 	"time"
 
 	"github.com/gobackto-work/pestilence/internal/workspace"
-
-	// Pure-Go SQLite. mattn/go-sqlite3 needs cgo, and the build environment has
-	// CGO_ENABLED=0 with no C compiler, so it cannot be built here at all.
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const createTable = `
@@ -38,53 +35,38 @@ const columns = `id, slug, owner_id, namespace, hostname, state,
                   created_at, last_active_at, deleted_at, last_error,
                   cpu, memory, storage, max_pods`
 
-// SQLite is a Store backed by one SQLite file.
-type SQLite struct{ db *sql.DB }
-
-// OpenSQLite opens or creates the database at path and applies the schema.
-func OpenSQLite(path string) (*SQLite, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	// SQLite permits one writer. Serialising here turns lock contention into
-	// queueing instead of "database is locked" failures under concurrent requests.
-	db.SetMaxOpenConns(1)
-
-	for _, stmt := range []string{createTable, createIndex} {
-		if _, err := db.Exec(stmt); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("apply schema: %w", err)
-		}
-	}
-	return &SQLite{db: db}, nil
-}
+// SQL is the PostgreSQL workspace store.
+type SQL struct{ db *sql.DB }
 
 // Close implements Store.
-func (s *SQLite) Close() error { return s.db.Close() }
+func (s *SQL) Close() error { return s.db.Close() }
 
 // Create implements Store. It validates before inserting, so a malformed record is
 // refused at the boundary rather than discovered mid-provision.
-func (s *SQLite) Create(ctx context.Context, w workspace.Workspace) error {
+func (s *SQL) Create(ctx context.Context, w workspace.Workspace) error {
 	if err := w.Validate(); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO workspaces (`+columns+`)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		w.ID, w.Slug, w.OwnerID, w.Namespace, w.Hostname, string(w.State),
 		formatTime(w.CreatedAt), formatTime(w.LastActiveAt), nullableTime(w.DeletedAt), w.LastError,
 		w.Limits.CPU, w.Limits.Memory, w.Limits.Storage, w.Limits.MaxPods,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("insert workspace %s: %w", w.ID, ErrDuplicate)
+		}
 		return fmt.Errorf("insert workspace %s: %w", w.ID, err)
 	}
 	return nil
 }
 
 // Get implements Store.
-func (s *SQLite) Get(ctx context.Context, id string) (workspace.Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE id = ?`, id)
+func (s *SQL) Get(ctx context.Context, id string) (workspace.Workspace, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE id = $1`, id)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspace.Workspace{}, ErrNotFound
@@ -96,8 +78,8 @@ func (s *SQLite) Get(ctx context.Context, id string) (workspace.Workspace, error
 }
 
 // GetBySlug implements Store.
-func (s *SQLite) GetBySlug(ctx context.Context, slug string) (workspace.Workspace, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE slug = ?`, slug)
+func (s *SQL) GetBySlug(ctx context.Context, slug string) (workspace.Workspace, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE slug = $1`, slug)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspace.Workspace{}, ErrNotFound
@@ -109,7 +91,7 @@ func (s *SQLite) GetBySlug(ctx context.Context, slug string) (workspace.Workspac
 }
 
 // List implements Store, ordered by creation so the output is stable.
-func (s *SQLite) List(ctx context.Context) ([]workspace.Workspace, error) {
+func (s *SQL) List(ctx context.Context) ([]workspace.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM workspaces ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspaces: %w", err)
@@ -130,7 +112,7 @@ func (s *SQLite) List(ctx context.Context) ([]workspace.Workspace, error) {
 // UpdateState implements Store as a compare-and-set: the row is only changed when
 // its state is still `from`, which is what stops two reconcilers both acting on
 // one transition.
-func (s *SQLite) UpdateState(ctx context.Context, id string, from, to workspace.State) error {
+func (s *SQL) UpdateState(ctx context.Context, id string, from, to workspace.State) error {
 	if !from.CanTransitionTo(to) {
 		return fmt.Errorf("workspace %s: illegal transition %s -> %s", id, from, to)
 	}
@@ -141,8 +123,8 @@ func (s *SQLite) UpdateState(ctx context.Context, id string, from, to workspace.
 		stamp = formatTime(time.Now().UTC())
 	}
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE workspaces SET state = ?, deleted_at = COALESCE(?, deleted_at)
-         WHERE id = ? AND state = ?`,
+		`UPDATE workspaces SET state = $1, deleted_at = COALESCE($2, deleted_at)
+         WHERE id = $3 AND state = $4`,
 		string(to), stamp, id, string(from))
 	if err != nil {
 		return fmt.Errorf("update state for %s: %w", id, err)
@@ -168,8 +150,8 @@ func (s *SQLite) UpdateState(ctx context.Context, id string, from, to workspace.
 //
 // It is deliberately separate from UpdateState: a failure reason is diagnostic,
 // and recording it must not change lifecycle state.
-func (s *SQLite) SetError(ctx context.Context, id, message string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_error = ? WHERE id = ?`, message, id)
+func (s *SQL) SetError(ctx context.Context, id, message string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_error = $1 WHERE id = $2`, message, id)
 	if err != nil {
 		return fmt.Errorf("set error for %s: %w", id, err)
 	}
@@ -184,8 +166,8 @@ func (s *SQLite) SetError(ctx context.Context, id, message string) error {
 }
 
 // Touch implements Store.
-func (s *SQLite) Touch(ctx context.Context, id string, at time.Time) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ? WHERE id = ?`,
+func (s *SQL) Touch(ctx context.Context, id string, at time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = $1 WHERE id = $2`,
 		formatTime(at), id)
 	if err != nil {
 		return fmt.Errorf("touch %s: %w", id, err)

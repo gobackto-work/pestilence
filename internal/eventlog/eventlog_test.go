@@ -3,10 +3,10 @@ package eventlog
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/testutil"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -15,7 +15,7 @@ import (
 
 func open(t *testing.T) *Log {
 	t.Helper()
-	l, err := Open(filepath.Join(t.TempDir(), "events.db"))
+	l, err := OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestDeletingAWorkspaceRemovesItsRunsAndEvents(t *testing.T) {
 	// The run summary has no getter any more, so this counts the rows directly. It still
 	// matters: a summary left behind is tenant data that outlives its workspace.
 	var runs int
-	if err := f.log.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE workspace_id = ?`, f.workspaceID).Scan(&runs); err != nil {
+	if err := f.log.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE workspace_id = $1`, f.workspaceID).Scan(&runs); err != nil {
 		t.Fatalf("count runs: %v", err)
 	}
 	if runs != 0 {
@@ -362,29 +362,6 @@ func TestPruneNeverDiscardsWhatASubscriptionHasNotTaken(t *testing.T) {
 	}
 	if result.ByCount != 1 {
 		t.Errorf("pruned %d by count once the cursor moved, want 1", result.ByCount)
-	}
-}
-
-// The two pragmas are per-connection settings, so they live in the DSN. A mistake
-// there is silent, and this is the test that catches it.
-func TestTheFileUsesWALAndWaitsOnALock(t *testing.T) {
-	l := open(t)
-	ctx := context.Background()
-
-	var mode string
-	if err := l.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {
-		t.Fatalf("journal_mode: %v", err)
-	}
-	if mode != "wal" {
-		t.Errorf("journal_mode = %q, want wal", mode)
-	}
-
-	var timeout int
-	if err := l.db.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&timeout); err != nil {
-		t.Fatalf("busy_timeout: %v", err)
-	}
-	if timeout != 5000 {
-		t.Errorf("busy_timeout = %d, want 5000", timeout)
 	}
 }
 

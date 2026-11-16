@@ -16,6 +16,22 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.12
+        env:
+          POSTGRES_USER: pestilence
+          POSTGRES_DB: pestilence_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pestilence -d pestilence_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PESTILENCE_TEST_POSTGRES_URL: postgres://pestilence@127.0.0.1:5432/pestilence_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
         with:

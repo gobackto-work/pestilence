@@ -43,9 +43,7 @@ mkdir -p "$REPO_ROOT/image/dist"
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
 	echo "==> cross-compile linux/amd64 control-plane"
-	# CGO_ENABLED=0 is required, not merely preferred: the target is distroless
-	# static, which has no libc, and the SQLite driver is pure Go so nothing needs
-	# cgo in the first place.
+	# The target is a static distroless image with no libc.
 	(cd "$REPO_ROOT" &&
 		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 "$GO_BIN" build -trimpath \
 			-o "image/control-plane/$NAME" ./cmd/control-plane)

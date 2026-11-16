@@ -16,6 +16,9 @@ var (
 	// ErrNotFound means there is no such workspace.
 	ErrNotFound = errors.New("workspace not found")
 
+	// ErrDuplicate means a workspace identifier or slug already exists.
+	ErrDuplicate = errors.New("workspace already exists")
+
 	// ErrConflict means the workspace was not in the state the caller expected,
 	// so something else moved it first.
 	ErrConflict = errors.New("workspace state changed")

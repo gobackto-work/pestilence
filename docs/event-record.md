@@ -78,17 +78,10 @@ the equivalence between the count and the size.
 Nothing selects an event by a value inside `attributes`. Every read uses `sequence`,
 `run_id`, `workspace_id`, `state` or `kind`, and each of those is a column.
 
-This is what makes a JSON column in a relational database the right choice. The access
-pattern is an append and then a scan forward from a cursor, which is what a rowid table
-does best. A document store would add query freedom that nothing needs, and give up the
-transactional ordered append that everything depends on.
+The event table stores the attributes as JSON text.
+The read path scans events in sequence order from a cursor.
 
-The rule that keeps it true: **an attribute that is ever queried becomes a column.** A
-queried attribute is a first-class field wearing a disguise. SQLite can also index into
-JSON with a generated column, so the escape hatch exists without changing the database:
-
-    ALTER TABLE events ADD COLUMN tokens INTEGER
-      GENERATED ALWAYS AS (json_extract(attributes, '$.tokens')) VIRTUAL;
+A queried attribute must become a column.
 
 ### Encoding
 
@@ -409,12 +402,9 @@ principal, so two cursors for one owner cannot exist.
 
 ## Storage
 
-The event record uses its own SQLite file. It does not share the file that holds the
-workspace registry.
-
-The two files have different shapes. The registry is read-mostly, and it holds a row per
-workspace. The record is append-heavy, and it holds a row per transition. One file with
-one writer means the two contend for one lock. Two files never contend.
+PostgreSQL stores the event record and workspace registry in separate tables.
+The event store serialises writes through transaction commit.
+This prevents a subscription cursor from passing an uncommitted event.
 
 ## Retention
 
@@ -463,9 +453,7 @@ The limit is a count of events and not a byte size. The `sequence` orders the ev
 measure drifts with the row size. 1700 events is about 0.5 MB, so the two statements agree,
 and one constant is the whole policy.
 
-SQLite does not shrink its file when rows are deleted. It reuses the pages, so the file
-stays at its high-water mark. The write-ahead log needs room beside it, and the log can be
-larger than the database while a writer is busy. Budget for both.
+PostgreSQL reuses space after it removes rows. Database operations must include vacuum and storage monitoring.
 
 The event rows are a queue. The run summary is the log. A query for "what did this run
 do" reads the summary. A query for "what did this agent do in March" reads the transcript

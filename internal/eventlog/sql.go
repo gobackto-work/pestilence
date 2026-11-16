@@ -9,10 +9,6 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-
-	// Pure-Go SQLite, as the workspace registry uses. mattn/go-sqlite3 needs cgo and
-	// the build environment sets CGO_ENABLED=0 with no C compiler.
-	_ "modernc.org/sqlite"
 )
 
 const (
@@ -26,14 +22,9 @@ const (
 
 // schema is applied in order on every open. Each statement is idempotent.
 var schema = []string{
-	// sequence is AUTOINCREMENT and not a bare INTEGER PRIMARY KEY.
-	//
-	// A bare rowid is reused after the row with the highest value is deleted, and this
-	// record deletes its newest rows when a workspace is deleted. A reused sequence
-	// would be at or below a subscriber's cursor, so the subscriber would discard a
-	// new event as one it had already seen. The event would be lost silently.
+	// A sequence must not be reused after an event is removed.
 	`CREATE TABLE IF NOT EXISTS events (
-        sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+        sequence       BIGSERIAL PRIMARY KEY,
         event_id       TEXT NOT NULL UNIQUE,
         run_id         TEXT NOT NULL,
         workspace_id   TEXT NOT NULL,
@@ -41,8 +32,8 @@ var schema = []string{
         kind           TEXT NOT NULL,
         previous_state TEXT NOT NULL,
         state          TEXT NOT NULL,
-        occurred_at    INTEGER NOT NULL,
-        recorded_at    INTEGER NOT NULL,
+        occurred_at    BIGINT NOT NULL,
+        recorded_at    BIGINT NOT NULL,
         attributes     TEXT NOT NULL
     )`,
 
@@ -64,10 +55,10 @@ var schema = []string{
         owner_id      TEXT NOT NULL,
         state         TEXT NOT NULL,
         mode          TEXT NOT NULL,
-        started_at    INTEGER NOT NULL,
-        updated_at    INTEGER NOT NULL,
-        ended_at      INTEGER,
-        last_sequence INTEGER NOT NULL
+        started_at    BIGINT NOT NULL,
+        updated_at    BIGINT NOT NULL,
+        ended_at      BIGINT,
+        last_sequence BIGINT NOT NULL
     )`,
 
 	`CREATE INDEX IF NOT EXISTS runs_workspace_idx ON runs(workspace_id)`,
@@ -79,11 +70,11 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS subscriptions (
         id           TEXT PRIMARY KEY,
         principal_id TEXT NOT NULL UNIQUE,
-        cursor       INTEGER NOT NULL DEFAULT 0
+        cursor       BIGINT NOT NULL DEFAULT 0
     )`,
 }
 
-// Log is the durable record, backed by one SQLite file.
+// Log is the durable PostgreSQL run record.
 type Log struct {
 	db *sql.DB
 
@@ -94,38 +85,7 @@ type Log struct {
 	maxAge    time.Duration
 }
 
-// Open opens or creates the record at path and applies the schema.
-func Open(path string) (*Log, error) {
-	// The pragmas are in the DSN because two of them are per-connection settings. A
-	// pragma run once after opening applies to one pooled connection and not to the
-	// others. This driver applies _pragma to every connection it opens.
-	//
-	// synchronous=NORMAL is the WAL default and it can lose the last few transactions
-	// on a node crash. This record drives notifications, so that is accepted.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
-
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open event record: %w", err)
-	}
-
-	// WAL lets readers run while one writer writes, so this file differs from the
-	// registry, which serialises to a single connection. busy_timeout makes a second
-	// writer wait rather than fail with SQLITE_BUSY.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
-
-	for _, stmt := range schema {
-		if _, err := db.Exec(stmt); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("apply schema: %w", err)
-		}
-	}
-	return &Log{db: db, maxEvents: retentionCount, maxAge: retentionAge}, nil
-}
-
-// Close releases the file.
+// Close releases the database pool.
 func (l *Log) Close() error { return l.db.Close() }
 
 // Append records the state that a runtime reported for a run.
@@ -141,7 +101,7 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 		return AppendResult{}, err
 	}
 
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin: %w", err)
 	}
@@ -194,7 +154,7 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 // existingEvent returns the sequence of the event that holds this idempotency key.
 func existingEvent(ctx context.Context, tx *sql.Tx, id string) (int64, bool, error) {
 	var sequence int64
-	err := tx.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_id = ?`, id).Scan(&sequence)
+	err := tx.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_id = $1`, id).Scan(&sequence)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, false, nil
@@ -212,7 +172,7 @@ func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, 
 		mode     string
 		sequence int64
 	)
-	err := tx.QueryRowContext(ctx, `SELECT state, mode, last_sequence FROM runs WHERE id = ?`, runID).
+	err := tx.QueryRowContext(ctx, `SELECT state, mode, last_sequence FROM runs WHERE id = $1`, runID).
 		Scan(&state, &mode, &sequence)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -225,18 +185,15 @@ func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, 
 
 // insertEvent writes one event and returns its sequence.
 func insertEvent(ctx context.Context, tx *sql.Tx, r Report, kind Kind, from State, at time.Time, attributes string) (int64, error) {
-	res, err := tx.ExecContext(ctx, `
+	var sequence int64
+	err := tx.QueryRowContext(ctx, `
         INSERT INTO events (event_id, run_id, workspace_id, owner_id, kind,
                             previous_state, state, occurred_at, recorded_at, attributes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING sequence`,
 		r.ID, r.RunID, r.WorkspaceID, r.OwnerID, string(kind),
-		string(from), string(r.State), millis(r.OccurredAt), millis(at), attributes)
+		string(from), string(r.State), millis(r.OccurredAt), millis(at), attributes).Scan(&sequence)
 	if err != nil {
 		return 0, fmt.Errorf("insert event %s: %w", r.ID, err)
-	}
-	sequence, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("sequence for event %s: %w", r.ID, err)
 	}
 	return sequence, nil
 }
@@ -251,7 +208,7 @@ func upsertRun(ctx context.Context, tx *sql.Tx, r Report, at time.Time, sequence
 	_, err := tx.ExecContext(ctx, `
         INSERT INTO runs (id, workspace_id, owner_id, state, mode,
                           started_at, updated_at, ended_at, last_sequence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT(id) DO UPDATE SET
             state         = excluded.state,
             updated_at    = excluded.updated_at,
@@ -277,7 +234,7 @@ func (l *Log) Outstanding(ctx context.Context, subscriptionID string, limit int)
 	}
 
 	rows, err := l.db.QueryContext(ctx, selectEvents+`
-        WHERE sequence > ? AND owner_id = ? ORDER BY sequence LIMIT ?`,
+        WHERE sequence > $1 AND owner_id = $2 ORDER BY sequence LIMIT $3`,
 		s.Cursor, s.PrincipalID, limit)
 	if err != nil {
 		return Subscription{}, nil, fmt.Errorf("read outstanding for %s: %w", subscriptionID, err)
@@ -303,7 +260,7 @@ func (l *Log) Runs(ctx context.Context, ownerID string, limit int) ([]Run, error
 	rows, err := l.db.QueryContext(ctx, `
         SELECT id, workspace_id, owner_id, state, mode,
                started_at, updated_at, ended_at, last_sequence
-        FROM runs WHERE owner_id = ? ORDER BY last_sequence DESC LIMIT ?`, ownerID, limit)
+        FROM runs WHERE owner_id = $1 ORDER BY last_sequence DESC LIMIT $2`, ownerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read runs for %s: %w", ownerID, err)
 	}
@@ -349,24 +306,35 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 	if !opaqueID.MatchString(principalID) {
 		return Subscription{}, fmt.Errorf("%w: principal id %q", ErrInvalid, principalID)
 	}
-	// The unique constraint on the principal makes a concurrent create a no-op rather than a
-	// second cursor.
-	if _, err := l.db.ExecContext(ctx, `
+	// A prune and a new subscription must agree which events the subscriber can see.
+	tx, err := l.beginWrite(ctx)
+	if err != nil {
+		return Subscription{}, fmt.Errorf("begin subscription: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
         INSERT INTO subscriptions (id, principal_id, cursor)
-        VALUES (?, ?, 0)
+        VALUES ($1, $2, 0)
         ON CONFLICT DO NOTHING`,
 		ulid.Make().String(), principalID); err != nil {
 		return Subscription{}, fmt.Errorf("create the pull subscription for %s: %w", principalID, err)
 	}
 
-	row := l.db.QueryRowContext(ctx, selectSubscriptions+`
-        WHERE principal_id = ?`, principalID)
-	return scanSubscription(row)
+	row := tx.QueryRowContext(ctx, selectSubscriptions+`
+        WHERE principal_id = $1`, principalID)
+	sub, err := scanSubscription(row)
+	if err != nil {
+		return Subscription{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Subscription{}, fmt.Errorf("commit subscription: %w", err)
+	}
+	return sub, nil
 }
 
 // Subscription returns one subscription.
 func (l *Log) Subscription(ctx context.Context, id string) (Subscription, error) {
-	return scanSubscription(l.db.QueryRowContext(ctx, selectSubscriptions+` WHERE id = ?`, id))
+	return scanSubscription(l.db.QueryRowContext(ctx, selectSubscriptions+` WHERE id = $1`, id))
 }
 
 // AdvanceCursor records what a subscription has taken.
@@ -378,7 +346,7 @@ func (l *Log) AdvanceCursor(ctx context.Context, id string, to int64) error {
 		return err
 	}
 	if _, err := l.db.ExecContext(ctx,
-		`UPDATE subscriptions SET cursor = ? WHERE id = ? AND cursor < ?`, to, id, to); err != nil {
+		`UPDATE subscriptions SET cursor = $1 WHERE id = $2 AND cursor < $3`, to, id, to); err != nil {
 		return fmt.Errorf("advance cursor for %s: %w", id, err)
 	}
 	return nil
@@ -400,7 +368,7 @@ type PruneResult struct {
 //
 // An event that an active subscription has not taken is never discarded.
 func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("begin: %w", err)
 	}
@@ -425,7 +393,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	var out PruneResult
 
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM events WHERE recorded_at < ? AND sequence <= ?`,
+		`DELETE FROM events WHERE recorded_at < $1 AND sequence <= $2`,
 		millis(now.Add(-l.maxAge)), bound)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("prune by age: %w", err)
@@ -436,13 +404,13 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	// limit is kept, so everything below it goes.
 	var threshold sql.NullInt64
 	err = tx.QueryRowContext(ctx,
-		`SELECT sequence FROM events WHERE sequence <= ? ORDER BY sequence DESC LIMIT 1 OFFSET ?`,
+		`SELECT sequence FROM events WHERE sequence <= $1 ORDER BY sequence DESC LIMIT 1 OFFSET $2`,
 		bound, l.maxEvents-1).Scan(&threshold)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return PruneResult{}, fmt.Errorf("size threshold: %w", err)
 	}
 	if threshold.Valid {
-		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE sequence < ?`, threshold.Int64)
+		res, err := tx.ExecContext(ctx, `DELETE FROM events WHERE sequence < $1`, threshold.Int64)
 		if err != nil {
 			return PruneResult{}, fmt.Errorf("prune by count: %w", err)
 		}
@@ -450,7 +418,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 	}
 
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM events WHERE sequence > ?`, bound).Scan(&out.Held); err != nil {
+		`SELECT COUNT(*) FROM events WHERE sequence > $1`, bound).Scan(&out.Held); err != nil {
 		return PruneResult{}, fmt.Errorf("count held: %w", err)
 	}
 
@@ -465,15 +433,15 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 // Subscriptions survive. A subscription belongs to a principal and outlives any one
 // workspace of that principal.
 func (l *Log) DeleteWorkspace(ctx context.Context, workspaceID string) error {
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	for _, stmt := range []string{
-		`DELETE FROM events WHERE workspace_id = ?`,
-		`DELETE FROM runs WHERE workspace_id = ?`,
+		`DELETE FROM events WHERE workspace_id = $1`,
+		`DELETE FROM runs WHERE workspace_id = $1`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt, workspaceID); err != nil {
 			return fmt.Errorf("delete workspace %s rows: %w", workspaceID, err)

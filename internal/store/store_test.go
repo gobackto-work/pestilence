@@ -3,20 +3,20 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gobackto-work/pestilence/internal/tenant"
+	"github.com/gobackto-work/pestilence/internal/testutil"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 )
 
-func newStore(t *testing.T) (*SQLite, string) {
+func newStore(t *testing.T) (*SQL, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "workspaces.db")
-	s, err := OpenSQLite(path)
+	path := testutil.PostgresSchema(t)
+	s, err := OpenPostgres(path)
 	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s, path
@@ -100,8 +100,8 @@ func TestSlugIsUnique(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	err := s.Create(ctx, record(t, "id-2", "fuzzy-wombat-x7q3"))
-	if err == nil {
-		t.Fatal("a duplicate slug was accepted")
+	if !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate slug: got %v, want ErrDuplicate", err)
 	}
 }
 
@@ -170,6 +170,36 @@ func TestUpdateStateIsCompareAndSet(t *testing.T) {
 	}
 	if got.State != workspace.StateRunning {
 		t.Errorf("state = %s, want RUNNING", got.State)
+	}
+}
+
+func TestConcurrentStateUpdateHasOneWinner(t *testing.T) {
+	s, _ := newStore(t)
+	w := record(t, "id-1", "fuzzy-wombat-x7q3")
+	if err := s.Create(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	const writers = 8
+	results := make(chan error, writers)
+	for range writers {
+		go func() {
+			results <- s.UpdateState(context.Background(), w.ID, workspace.StateProvisioning, workspace.StateRunning)
+		}()
+	}
+	var won, conflicts int
+	for range writers {
+		err := <-results
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected update error: %v", err)
+		}
+	}
+	if won != 1 || conflicts != writers-1 {
+		t.Fatalf("got %d winners and %d conflicts", won, conflicts)
 	}
 }
 
@@ -259,7 +289,7 @@ func TestDataSurvivesReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened, err := OpenSQLite(path)
+	reopened, err := OpenPostgres(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

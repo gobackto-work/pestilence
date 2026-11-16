@@ -5,10 +5,7 @@
 // child. All three need one record with an identity and an order, so all three read
 // this package.
 //
-// The record has its own SQLite file. It never shares the file that holds the
-// workspace registry. That file is read-mostly and holds a row per workspace; this
-// one is append-heavy and holds a row per transition. One writer for both would make
-// them contend for one lock, and the two have different durability needs.
+// The record and workspace registry use separate tables in PostgreSQL.
 //
 // See docs/event-record.md for the contract this implements.
 package eventlog
