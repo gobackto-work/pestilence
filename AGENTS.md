@@ -6,10 +6,14 @@ to every repository in the platform: `town`, `pestilence`, `scarab`, `my-opps`, 
 
 ## Git discipline
 
-Do not push unless the task says to push or publish. "Prepare the release" is not
-permission to push.
+You can push working branches and create pull requests with `gh`.
 
-- Stop before a push. Report the branch, and the tag if there is one. Then wait.
+- Use Conventional Commits, such as `feat(api): add workspaces` or `fix: reject invalid tokens`.
+- Mark a breaking change with `!` or a `BREAKING CHANGE:` footer.
+- Name branches `type/short-description`, such as `feat/workspace-api`.
+- Use a Conventional Commit type and a kebab-case branch description.
+- Do not push directly to `main` without an explicit instruction.
+- Do not merge a pull request without an explicit instruction.
 - Do not create or push a tag without an explicit instruction.
 - A commit is not a push. Commit to keep a change set coherent, and say that you did.
 - Do not delete a remote branch, a tag, a published package, or a cluster object
