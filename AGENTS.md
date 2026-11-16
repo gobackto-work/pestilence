@@ -8,6 +8,10 @@ to every repository in the platform: `town`, `pestilence`, `scarab`, `my-opps`, 
 
 You can push working branches and create pull requests with `gh`.
 
+- Use Conventional Commits, such as `feat(api): add workspaces` or `fix: reject invalid tokens`.
+- Mark a breaking change with `!` or a `BREAKING CHANGE:` footer.
+- Name branches `type/short-description`, such as `feat/workspace-api`.
+- Use a Conventional Commit type and a kebab-case branch description.
 - Do not push directly to `main` without an explicit instruction.
 - Do not merge a pull request without an explicit instruction.
 - Do not create or push a tag without an explicit instruction.
