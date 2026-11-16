@@ -116,11 +116,21 @@ else
 	ok "scripts/install-tools.sh covers every required tool"
 fi
 
+# Test helpers are imported only by tests, so they cannot be reached from main.
+deadcode_production() {
+	local output
+	if ! output="$(deadcode ./...)"; then
+		printf '%s\n' "$output"
+		return 1
+	fi
+	printf '%s\n' "$output" | tr '\134' '/' | awk 'NF && index($0, "internal/sqlbackend/testutil/") == 0'
+}
+
 step "go: format, vet, lint, dead code"
 check_quiet "gofmt" gofmt -l .
 check "go vet" go vet ./...
 check "staticcheck" staticcheck ./...
-check_quiet "deadcode (unreachable functions)" deadcode ./...
+check_quiet "deadcode (unreachable functions)" deadcode_production
 check "golangci-lint (complexity, duplication, security)" golangci-lint run ./...
 
 step "go: tests and vulnerabilities"

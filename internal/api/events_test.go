@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gobackto-work/pestilence/internal/eventlog"
+	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -50,7 +52,13 @@ func newIngestFixture(t *testing.T) ingestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	st, err := store.OpenSQLite(t.TempDir() + "/w.db")
+	path := t.TempDir() + "/w.db"
+	open := store.OpenSQLite
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		path = testutil.PostgresSchema(t)
+		open = store.OpenPostgres
+	}
+	st, err := open(path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

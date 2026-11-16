@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"crypto/rand"
 	"github.com/gobackto-work/pestilence/internal/auth"
 	"github.com/gobackto-work/pestilence/internal/eventlog"
+	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -26,7 +28,13 @@ import (
 
 func newServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "w.db"))
+	path := filepath.Join(t.TempDir(), "w.db")
+	open := store.OpenSQLite
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		path = testutil.PostgresSchema(t)
+		open = store.OpenPostgres
+	}
+	s, err := open(path)
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
@@ -46,7 +54,13 @@ func newServer(t *testing.T) (*Server, store.Store) {
 // ingest endpoint is wired up whenever it is constructed.
 func newEventLog(t *testing.T) *eventlog.Log {
 	t.Helper()
-	l, err := eventlog.Open(filepath.Join(t.TempDir(), "events.db"))
+	path := filepath.Join(t.TempDir(), "events.db")
+	open := eventlog.Open
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		path = testutil.PostgresSchema(t)
+		open = eventlog.OpenPostgres
+	}
+	l, err := open(path)
 	if err != nil {
 		t.Fatalf("open event record: %v", err)
 	}

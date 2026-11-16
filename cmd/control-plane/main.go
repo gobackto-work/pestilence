@@ -34,6 +34,7 @@ import (
 func main() {
 	var (
 		addr        = flag.String("addr", ":8080", "HTTP listen address")
+		backend     = flag.String("store-backend", "sqlite", "persistence backend: sqlite or postgres")
 		dbPath      = flag.String("db", "/var/lib/pestilence/pestilence.db", "SQLite database path")
 		eventPath   = flag.String("event-db", "/var/lib/pestilence/events.db", "SQLite event record path")
 		kubeconfig  = flag.String("kubeconfig", "", "kubeconfig path; empty uses in-cluster config")
@@ -54,6 +55,8 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if err := run(opts{
 		addr:            *addr,
+		backend:         *backend,
+		postgresURL:     os.Getenv("PESTILENCE_POSTGRES_URL"),
 		dbPath:          *dbPath,
 		eventPath:       *eventPath,
 		kubeconfig:      *kubeconfig,
@@ -76,6 +79,8 @@ func main() {
 
 type opts struct {
 	addr            string
+	backend         string
+	postgresURL     string
 	dbPath          string
 	eventPath       string
 	kubeconfig      string
@@ -98,7 +103,13 @@ type opts struct {
 // They are separate files on purpose. The registry is read-mostly and holds a row per
 // workspace; the record is append-heavy and holds a row per transition. One file with one
 // writer would make them contend for one lock.
-func openStores(o opts) (*store.SQLite, *eventlog.Log, func(), error) {
+func openStores(o opts) (*store.SQL, *eventlog.Log, func(), error) {
+	if o.backend == "postgres" {
+		return openPostgresStores(o.postgresURL)
+	}
+	if o.backend != "" && o.backend != "sqlite" {
+		return nil, nil, nil, fmt.Errorf("unknown store backend %q", o.backend)
+	}
 	st, err := store.OpenSQLite(o.dbPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open store: %w", err)
@@ -159,7 +170,7 @@ func pruneEvents(ctx context.Context, log *eventlog.Log, logger *slog.Logger) {
 //
 // A function rather than a literal inside run, because the config has grown to the point
 // where it is most of what run does.
-func newAPI(o opts, st *store.SQLite, events *eventlog.Log, prov *provisioner.Reconciler,
+func newAPI(o opts, st store.Store, events *eventlog.Log, prov *provisioner.Reconciler,
 	verifier *auth.Verifier, log *slog.Logger) *api.Server {
 	return api.New(st, api.Config{
 		Verifier:       verifier,

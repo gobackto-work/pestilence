@@ -3,10 +3,12 @@ package eventlog
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -15,7 +17,13 @@ import (
 
 func open(t *testing.T) *Log {
 	t.Helper()
-	l, err := Open(filepath.Join(t.TempDir(), "events.db"))
+	var l *Log
+	var err error
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		l, err = OpenPostgres(testutil.PostgresSchema(t))
+	} else {
+		l, err = Open(filepath.Join(t.TempDir(), "events.db"))
+	}
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -368,6 +376,9 @@ func TestPruneNeverDiscardsWhatASubscriptionHasNotTaken(t *testing.T) {
 // The two pragmas are per-connection settings, so they live in the DSN. A mistake
 // there is silent, and this is the test that catches it.
 func TestTheFileUsesWALAndWaitsOnALock(t *testing.T) {
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		t.Skip("SQLite-specific settings")
+	}
 	l := open(t)
 	ctx := context.Background()
 

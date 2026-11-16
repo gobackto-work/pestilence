@@ -3,20 +3,27 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 )
 
-func newStore(t *testing.T) (*SQLite, string) {
+func newStore(t *testing.T) (*SQL, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "workspaces.db")
-	s, err := OpenSQLite(path)
+	open := OpenSQLite
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		path = testutil.PostgresSchema(t)
+		open = OpenPostgres
+	}
+	s, err := open(path)
 	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s, path
@@ -173,6 +180,36 @@ func TestUpdateStateIsCompareAndSet(t *testing.T) {
 	}
 }
 
+func TestConcurrentStateUpdateHasOneWinner(t *testing.T) {
+	s, _ := newStore(t)
+	w := record(t, "id-1", "fuzzy-wombat-x7q3")
+	if err := s.Create(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	const writers = 8
+	results := make(chan error, writers)
+	for range writers {
+		go func() {
+			results <- s.UpdateState(context.Background(), w.ID, workspace.StateProvisioning, workspace.StateRunning)
+		}()
+	}
+	var won, conflicts int
+	for range writers {
+		err := <-results
+		switch {
+		case err == nil:
+			won++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected update error: %v", err)
+		}
+	}
+	if won != 1 || conflicts != writers-1 {
+		t.Fatalf("got %d winners and %d conflicts", won, conflicts)
+	}
+}
+
 func TestUpdateStateOnUnknownWorkspaceIsNotFound(t *testing.T) {
 	s, _ := newStore(t)
 	err := s.UpdateState(context.Background(), "nope", workspace.StateProvisioning, workspace.StateRunning)
@@ -259,7 +296,11 @@ func TestDataSurvivesReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened, err := OpenSQLite(path)
+	open := OpenSQLite
+	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
+		open = OpenPostgres
+	}
+	reopened, err := open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/gobackto-work/pestilence/internal/workspace"
 
 	// Pure-Go SQLite. mattn/go-sqlite3 needs cgo, and the build environment has
@@ -38,11 +39,11 @@ const columns = `id, slug, owner_id, namespace, hostname, state,
                   created_at, last_active_at, deleted_at, last_error,
                   cpu, memory, storage, max_pods`
 
-// SQLite is a Store backed by one SQLite file.
-type SQLite struct{ db *sql.DB }
+// SQL is the workspace store implemented by either SQL backend.
+type SQL struct{ db *sqlbackend.DB }
 
 // OpenSQLite opens or creates the database at path and applies the schema.
-func OpenSQLite(path string) (*SQLite, error) {
+func OpenSQLite(path string) (*SQL, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -57,15 +58,15 @@ func OpenSQLite(path string) (*SQLite, error) {
 			return nil, fmt.Errorf("apply schema: %w", err)
 		}
 	}
-	return &SQLite{db: db}, nil
+	return &SQL{db: sqlbackend.Wrap(db, false)}, nil
 }
 
 // Close implements Store.
-func (s *SQLite) Close() error { return s.db.Close() }
+func (s *SQL) Close() error { return s.db.Close() }
 
 // Create implements Store. It validates before inserting, so a malformed record is
 // refused at the boundary rather than discovered mid-provision.
-func (s *SQLite) Create(ctx context.Context, w workspace.Workspace) error {
+func (s *SQL) Create(ctx context.Context, w workspace.Workspace) error {
 	if err := w.Validate(); err != nil {
 		return err
 	}
@@ -83,7 +84,7 @@ func (s *SQLite) Create(ctx context.Context, w workspace.Workspace) error {
 }
 
 // Get implements Store.
-func (s *SQLite) Get(ctx context.Context, id string) (workspace.Workspace, error) {
+func (s *SQL) Get(ctx context.Context, id string) (workspace.Workspace, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE id = ?`, id)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -96,7 +97,7 @@ func (s *SQLite) Get(ctx context.Context, id string) (workspace.Workspace, error
 }
 
 // GetBySlug implements Store.
-func (s *SQLite) GetBySlug(ctx context.Context, slug string) (workspace.Workspace, error) {
+func (s *SQL) GetBySlug(ctx context.Context, slug string) (workspace.Workspace, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM workspaces WHERE slug = ?`, slug)
 	w, err := scanWorkspace(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -109,7 +110,7 @@ func (s *SQLite) GetBySlug(ctx context.Context, slug string) (workspace.Workspac
 }
 
 // List implements Store, ordered by creation so the output is stable.
-func (s *SQLite) List(ctx context.Context) ([]workspace.Workspace, error) {
+func (s *SQL) List(ctx context.Context) ([]workspace.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM workspaces ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspaces: %w", err)
@@ -130,7 +131,7 @@ func (s *SQLite) List(ctx context.Context) ([]workspace.Workspace, error) {
 // UpdateState implements Store as a compare-and-set: the row is only changed when
 // its state is still `from`, which is what stops two reconcilers both acting on
 // one transition.
-func (s *SQLite) UpdateState(ctx context.Context, id string, from, to workspace.State) error {
+func (s *SQL) UpdateState(ctx context.Context, id string, from, to workspace.State) error {
 	if !from.CanTransitionTo(to) {
 		return fmt.Errorf("workspace %s: illegal transition %s -> %s", id, from, to)
 	}
@@ -168,7 +169,7 @@ func (s *SQLite) UpdateState(ctx context.Context, id string, from, to workspace.
 //
 // It is deliberately separate from UpdateState: a failure reason is diagnostic,
 // and recording it must not change lifecycle state.
-func (s *SQLite) SetError(ctx context.Context, id, message string) error {
+func (s *SQL) SetError(ctx context.Context, id, message string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_error = ? WHERE id = ?`, message, id)
 	if err != nil {
 		return fmt.Errorf("set error for %s: %w", id, err)
@@ -184,7 +185,7 @@ func (s *SQLite) SetError(ctx context.Context, id, message string) error {
 }
 
 // Touch implements Store.
-func (s *SQLite) Touch(ctx context.Context, id string, at time.Time) error {
+func (s *SQL) Touch(ctx context.Context, id string, at time.Time) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE workspaces SET last_active_at = ? WHERE id = ?`,
 		formatTime(at), id)
 	if err != nil {

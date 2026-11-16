@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/oklog/ulid/v2"
 
 	// Pure-Go SQLite, as the workspace registry uses. mattn/go-sqlite3 needs cgo and
@@ -85,7 +86,7 @@ var schema = []string{
 
 // Log is the durable record, backed by one SQLite file.
 type Log struct {
-	db *sql.DB
+	db *sqlbackend.DB
 
 	// maxEvents and maxAge are the retention limits. They are fields and not only
 	// constants so that a test can lower them: the count limit is 1700, and a test that
@@ -122,7 +123,7 @@ func Open(path string) (*Log, error) {
 			return nil, fmt.Errorf("apply schema: %w", err)
 		}
 	}
-	return &Log{db: db, maxEvents: retentionCount, maxAge: retentionAge}, nil
+	return &Log{db: sqlbackend.Wrap(db, false), maxEvents: retentionCount, maxAge: retentionAge}, nil
 }
 
 // Close releases the file.
@@ -141,7 +142,7 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 		return AppendResult{}, err
 	}
 
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin: %w", err)
 	}
@@ -192,7 +193,7 @@ func (l *Log) Append(ctx context.Context, r Report) (AppendResult, error) {
 }
 
 // existingEvent returns the sequence of the event that holds this idempotency key.
-func existingEvent(ctx context.Context, tx *sql.Tx, id string) (int64, bool, error) {
+func existingEvent(ctx context.Context, tx *sqlbackend.Tx, id string) (int64, bool, error) {
 	var sequence int64
 	err := tx.QueryRowContext(ctx, `SELECT sequence FROM events WHERE event_id = ?`, id).Scan(&sequence)
 	switch {
@@ -206,7 +207,7 @@ func existingEvent(ctx context.Context, tx *sql.Tx, id string) (int64, bool, err
 
 // recordedState returns the state the record holds for a run, the mode it was recorded
 // with, and the sequence that set the state. A run the record has not seen has neither.
-func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, int64, error) {
+func recordedState(ctx context.Context, tx *sqlbackend.Tx, runID string) (State, Mode, int64, error) {
 	var (
 		state    string
 		mode     string
@@ -224,26 +225,23 @@ func recordedState(ctx context.Context, tx *sql.Tx, runID string) (State, Mode, 
 }
 
 // insertEvent writes one event and returns its sequence.
-func insertEvent(ctx context.Context, tx *sql.Tx, r Report, kind Kind, from State, at time.Time, attributes string) (int64, error) {
-	res, err := tx.ExecContext(ctx, `
+func insertEvent(ctx context.Context, tx *sqlbackend.Tx, r Report, kind Kind, from State, at time.Time, attributes string) (int64, error) {
+	var sequence int64
+	err := tx.QueryRowContext(ctx, `
         INSERT INTO events (event_id, run_id, workspace_id, owner_id, kind,
                             previous_state, state, occurred_at, recorded_at, attributes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING sequence`,
 		r.ID, r.RunID, r.WorkspaceID, r.OwnerID, string(kind),
-		string(from), string(r.State), millis(r.OccurredAt), millis(at), attributes)
+		string(from), string(r.State), millis(r.OccurredAt), millis(at), attributes).Scan(&sequence)
 	if err != nil {
 		return 0, fmt.Errorf("insert event %s: %w", r.ID, err)
-	}
-	sequence, err := res.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("sequence for event %s: %w", r.ID, err)
 	}
 	return sequence, nil
 }
 
 // upsertRun writes the summary in the same transaction as the event, so that the two can
 // never disagree. started_at keeps its first value and ended_at is stamped once.
-func upsertRun(ctx context.Context, tx *sql.Tx, r Report, at time.Time, sequence int64) error {
+func upsertRun(ctx context.Context, tx *sqlbackend.Tx, r Report, at time.Time, sequence int64) error {
 	var ended any
 	if r.State.Terminal() {
 		ended = millis(at)
@@ -349,9 +347,13 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 	if !opaqueID.MatchString(principalID) {
 		return Subscription{}, fmt.Errorf("%w: principal id %q", ErrInvalid, principalID)
 	}
-	// The unique constraint on the principal makes a concurrent create a no-op rather than a
-	// second cursor.
-	if _, err := l.db.ExecContext(ctx, `
+	// A prune and a new subscription must agree which events the subscriber can see.
+	tx, err := l.beginWrite(ctx)
+	if err != nil {
+		return Subscription{}, fmt.Errorf("begin subscription: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
         INSERT INTO subscriptions (id, principal_id, cursor)
         VALUES (?, ?, 0)
         ON CONFLICT DO NOTHING`,
@@ -359,9 +361,16 @@ func (l *Log) EnsurePull(ctx context.Context, principalID string) (Subscription,
 		return Subscription{}, fmt.Errorf("create the pull subscription for %s: %w", principalID, err)
 	}
 
-	row := l.db.QueryRowContext(ctx, selectSubscriptions+`
+	row := tx.QueryRowContext(ctx, selectSubscriptions+`
         WHERE principal_id = ?`, principalID)
-	return scanSubscription(row)
+	sub, err := scanSubscription(row)
+	if err != nil {
+		return Subscription{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Subscription{}, fmt.Errorf("commit subscription: %w", err)
+	}
+	return sub, nil
 }
 
 // Subscription returns one subscription.
@@ -400,7 +409,7 @@ type PruneResult struct {
 //
 // An event that an active subscription has not taken is never discarded.
 func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return PruneResult{}, fmt.Errorf("begin: %w", err)
 	}
@@ -465,7 +474,7 @@ func (l *Log) Prune(ctx context.Context, now time.Time) (PruneResult, error) {
 // Subscriptions survive. A subscription belongs to a principal and outlives any one
 // workspace of that principal.
 func (l *Log) DeleteWorkspace(ctx context.Context, workspaceID string) error {
-	tx, err := l.db.BeginTx(ctx, nil)
+	tx, err := l.beginWrite(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
