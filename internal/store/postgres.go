@@ -29,5 +29,5 @@ func OpenPostgres(dsn string) (*SQL, error) {
 			return nil, fmt.Errorf("apply postgres workspace schema: %w", err)
 		}
 	}
-	return &SQL{db: sqlbackend.Wrap(db, true)}, nil
+	return &SQL{db: sqlbackend.Wrap(db)}, nil
 }

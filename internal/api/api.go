@@ -643,9 +643,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// isDuplicate reports whether an error is a uniqueness violation. The store
-// returns the driver's error verbatim, so this matches on the SQLite message
-// rather than on a driver-specific type.
+// isDuplicate reports whether the store returned a uniqueness violation.
 func isDuplicate(err error) bool {
-	return err != nil && strings.Contains(strings.ToUpper(err.Error()), "UNIQUE")
+	return errors.Is(err, store.ErrDuplicate)
 }

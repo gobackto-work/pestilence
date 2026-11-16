@@ -13,11 +13,8 @@ import (
 )
 
 func TestPostgresRequiresURL(t *testing.T) {
-	if _, _, _, err := openStores(opts{backend: "postgres"}); err == nil {
-		t.Fatal("postgres backend accepted an empty URL")
-	}
-	if _, _, _, err := openStores(opts{backend: "unknown"}); err == nil {
-		t.Fatal("unknown backend was accepted")
+	if _, _, _, err := openPostgresStores(""); err == nil {
+		t.Fatal("an empty PostgreSQL URL was accepted")
 	}
 }
 
@@ -26,7 +23,7 @@ func TestPostgresStoreSelection(t *testing.T) {
 		t.Skip("requires the isolated PostgreSQL test database")
 	}
 	dsn := testutil.PostgresSchema(t)
-	workspaces, events, closeStores, err := openStores(opts{backend: "postgres", postgresURL: dsn})
+	workspaces, events, closeStores, err := openPostgresStores(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,10 +9,7 @@ import (
 
 	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/gobackto-work/pestilence/internal/workspace"
-
-	// Pure-Go SQLite. mattn/go-sqlite3 needs cgo, and the build environment has
-	// CGO_ENABLED=0 with no C compiler, so it cannot be built here at all.
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const createTable = `
@@ -39,27 +36,8 @@ const columns = `id, slug, owner_id, namespace, hostname, state,
                   created_at, last_active_at, deleted_at, last_error,
                   cpu, memory, storage, max_pods`
 
-// SQL is the workspace store implemented by either SQL backend.
+// SQL is the PostgreSQL workspace store.
 type SQL struct{ db *sqlbackend.DB }
-
-// OpenSQLite opens or creates the database at path and applies the schema.
-func OpenSQLite(path string) (*SQL, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	// SQLite permits one writer. Serialising here turns lock contention into
-	// queueing instead of "database is locked" failures under concurrent requests.
-	db.SetMaxOpenConns(1)
-
-	for _, stmt := range []string{createTable, createIndex} {
-		if _, err := db.Exec(stmt); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("apply schema: %w", err)
-		}
-	}
-	return &SQL{db: sqlbackend.Wrap(db, false)}, nil
-}
 
 // Close implements Store.
 func (s *SQL) Close() error { return s.db.Close() }
@@ -78,6 +56,10 @@ func (s *SQL) Create(ctx context.Context, w workspace.Workspace) error {
 		w.Limits.CPU, w.Limits.Memory, w.Limits.Storage, w.Limits.MaxPods,
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("insert workspace %s: %w", w.ID, ErrDuplicate)
+		}
 		return fmt.Errorf("insert workspace %s: %w", w.ID, err)
 	}
 	return nil

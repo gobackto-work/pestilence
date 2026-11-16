@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -52,13 +51,7 @@ func newIngestFixture(t *testing.T) ingestFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	path := t.TempDir() + "/w.db"
-	open := store.OpenSQLite
-	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
-		path = testutil.PostgresSchema(t)
-		open = store.OpenPostgres
-	}
-	st, err := open(path)
+	st, err := store.OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

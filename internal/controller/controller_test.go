@@ -5,10 +5,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/gobackto-work/pestilence/internal/sqlbackend/testutil"
 	"github.com/gobackto-work/pestilence/internal/store"
 	"github.com/gobackto-work/pestilence/internal/tenant"
 	"github.com/gobackto-work/pestilence/internal/workspace"
@@ -51,9 +51,9 @@ func (f *fakeProvisioner) WaitForDeletion(_ context.Context, spec tenant.Spec, _
 
 func newController(t *testing.T, prov Provisioner) (*Controller, store.Store) {
 	t.Helper()
-	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "w.db"))
+	s, err := store.OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	c := New(s, prov, Config{BrokerImage: "example/broker:dev", AgentImage: "example/agent:dev"},

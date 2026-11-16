@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,15 +26,9 @@ import (
 
 func newServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "w.db")
-	open := store.OpenSQLite
-	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
-		path = testutil.PostgresSchema(t)
-		open = store.OpenPostgres
-	}
-	s, err := open(path)
+	s, err := store.OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	srv := New(s, Config{
@@ -54,13 +46,7 @@ func newServer(t *testing.T) (*Server, store.Store) {
 // ingest endpoint is wired up whenever it is constructed.
 func newEventLog(t *testing.T) *eventlog.Log {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "events.db")
-	open := eventlog.Open
-	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
-		path = testutil.PostgresSchema(t)
-		open = eventlog.OpenPostgres
-	}
-	l, err := open(path)
+	l, err := eventlog.OpenPostgres(testutil.PostgresSchema(t))
 	if err != nil {
 		t.Fatalf("open event record: %v", err)
 	}

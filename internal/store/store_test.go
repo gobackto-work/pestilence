@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,13 +13,8 @@ import (
 
 func newStore(t *testing.T) (*SQL, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "workspaces.db")
-	open := OpenSQLite
-	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
-		path = testutil.PostgresSchema(t)
-		open = OpenPostgres
-	}
-	s, err := open(path)
+	path := testutil.PostgresSchema(t)
+	s, err := OpenPostgres(path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -107,8 +100,8 @@ func TestSlugIsUnique(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	err := s.Create(ctx, record(t, "id-2", "fuzzy-wombat-x7q3"))
-	if err == nil {
-		t.Fatal("a duplicate slug was accepted")
+	if !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate slug: got %v, want ErrDuplicate", err)
 	}
 }
 
@@ -296,11 +289,7 @@ func TestDataSurvivesReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	open := OpenSQLite
-	if os.Getenv("PESTILENCE_TEST_POSTGRES_URL") != "" {
-		open = OpenPostgres
-	}
-	reopened, err := open(path)
+	reopened, err := OpenPostgres(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}

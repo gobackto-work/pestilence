@@ -10,10 +10,6 @@ import (
 
 	"github.com/gobackto-work/pestilence/internal/sqlbackend"
 	"github.com/oklog/ulid/v2"
-
-	// Pure-Go SQLite, as the workspace registry uses. mattn/go-sqlite3 needs cgo and
-	// the build environment sets CGO_ENABLED=0 with no C compiler.
-	_ "modernc.org/sqlite"
 )
 
 const (
@@ -27,14 +23,9 @@ const (
 
 // schema is applied in order on every open. Each statement is idempotent.
 var schema = []string{
-	// sequence is AUTOINCREMENT and not a bare INTEGER PRIMARY KEY.
-	//
-	// A bare rowid is reused after the row with the highest value is deleted, and this
-	// record deletes its newest rows when a workspace is deleted. A reused sequence
-	// would be at or below a subscriber's cursor, so the subscriber would discard a
-	// new event as one it had already seen. The event would be lost silently.
+	// A sequence must not be reused after an event is removed.
 	`CREATE TABLE IF NOT EXISTS events (
-        sequence       INTEGER PRIMARY KEY AUTOINCREMENT,
+        sequence       BIGSERIAL PRIMARY KEY,
         event_id       TEXT NOT NULL UNIQUE,
         run_id         TEXT NOT NULL,
         workspace_id   TEXT NOT NULL,
@@ -42,8 +33,8 @@ var schema = []string{
         kind           TEXT NOT NULL,
         previous_state TEXT NOT NULL,
         state          TEXT NOT NULL,
-        occurred_at    INTEGER NOT NULL,
-        recorded_at    INTEGER NOT NULL,
+        occurred_at    BIGINT NOT NULL,
+        recorded_at    BIGINT NOT NULL,
         attributes     TEXT NOT NULL
     )`,
 
@@ -65,10 +56,10 @@ var schema = []string{
         owner_id      TEXT NOT NULL,
         state         TEXT NOT NULL,
         mode          TEXT NOT NULL,
-        started_at    INTEGER NOT NULL,
-        updated_at    INTEGER NOT NULL,
-        ended_at      INTEGER,
-        last_sequence INTEGER NOT NULL
+        started_at    BIGINT NOT NULL,
+        updated_at    BIGINT NOT NULL,
+        ended_at      BIGINT,
+        last_sequence BIGINT NOT NULL
     )`,
 
 	`CREATE INDEX IF NOT EXISTS runs_workspace_idx ON runs(workspace_id)`,
@@ -80,11 +71,11 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS subscriptions (
         id           TEXT PRIMARY KEY,
         principal_id TEXT NOT NULL UNIQUE,
-        cursor       INTEGER NOT NULL DEFAULT 0
+        cursor       BIGINT NOT NULL DEFAULT 0
     )`,
 }
 
-// Log is the durable record, backed by one SQLite file.
+// Log is the durable PostgreSQL run record.
 type Log struct {
 	db *sqlbackend.DB
 
@@ -93,37 +84,6 @@ type Log struct {
 	// reached it by appending would be slow for no gain.
 	maxEvents int
 	maxAge    time.Duration
-}
-
-// Open opens or creates the record at path and applies the schema.
-func Open(path string) (*Log, error) {
-	// The pragmas are in the DSN because two of them are per-connection settings. A
-	// pragma run once after opening applies to one pooled connection and not to the
-	// others. This driver applies _pragma to every connection it opens.
-	//
-	// synchronous=NORMAL is the WAL default and it can lose the last few transactions
-	// on a node crash. This record drives notifications, so that is accepted.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
-		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
-
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open event record: %w", err)
-	}
-
-	// WAL lets readers run while one writer writes, so this file differs from the
-	// registry, which serialises to a single connection. busy_timeout makes a second
-	// writer wait rather than fail with SQLITE_BUSY.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
-
-	for _, stmt := range schema {
-		if _, err := db.Exec(stmt); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("apply schema: %w", err)
-		}
-	}
-	return &Log{db: sqlbackend.Wrap(db, false), maxEvents: retentionCount, maxAge: retentionAge}, nil
 }
 
 // Close releases the file.

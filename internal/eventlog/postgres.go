@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/gobackto-work/pestilence/internal/sqlbackend"
@@ -25,14 +24,12 @@ func OpenPostgres(dsn string) (*Log, error) {
 		return nil, fmt.Errorf("connect postgres event record: %w", err)
 	}
 	for _, stmt := range schema {
-		stmt = strings.ReplaceAll(stmt, "INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
-		stmt = strings.ReplaceAll(stmt, "INTEGER", "BIGINT")
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("apply postgres event schema: %w", err)
 		}
 	}
-	return &Log{db: sqlbackend.Wrap(db, true), maxEvents: retentionCount, maxAge: retentionAge}, nil
+	return &Log{db: sqlbackend.Wrap(db), maxEvents: retentionCount, maxAge: retentionAge}, nil
 }
 
 // beginWrite serialises PostgreSQL event writers until commit. Sequence allocation alone
@@ -42,11 +39,9 @@ func (l *Log) beginWrite(ctx context.Context) (*sqlbackend.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	if l.db.Postgres {
-		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(726455818)"); err != nil {
-			_ = tx.Rollback()
-			return nil, fmt.Errorf("lock event writer: %w", err)
-		}
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(726455818)"); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("lock event writer: %w", err)
 	}
 	return tx, nil
 }

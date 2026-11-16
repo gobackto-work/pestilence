@@ -17,8 +17,7 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 
 # Cross-compiled by hack/load-image.sh into this build context.
 #
-# CGO_ENABLED=0 matters: the SQLite driver is pure Go (modernc.org/sqlite) precisely
-# because there is no C toolchain in this image and no libc to link against.
+# The PostgreSQL runtime is cross-compiled without CGO for this static image.
 COPY pestilence-control-plane /pestilence-control-plane
 
 # Numeric, not `nonroot`: with runAsNonRoot the kubelet must be able to verify the
